@@ -28,8 +28,10 @@ import {
   type DomainPack,
   type DomainRuntime,
   type InstallOptions,
+  type ToolDefinition,
 } from './types.js'
 import {
+  DomainPackValidationError,
   validateDomainIdentity,
   validateDomainPack,
   type CoreSurface,
@@ -160,6 +162,14 @@ export interface DefaultCommitPortOptions {
   readonly executable?: string
   /** 可执行性探测，缺省用 `fs.accessSync`。 */
   readonly isExecutable?: (path: string) => boolean
+}
+
+/** `ctx.tools` 的最小结构：只依赖 dsh-tools 的公开方法，不引入运行时依赖。 */
+interface ToolRegistryLike {
+  /** 注册一个工具，返回它的 unregister 函数（dsh-tools 契约）。 */
+  register(definition: ToolDefinition): () => void
+  /** 查当前可见工具；用于注册前的重名预检。 */
+  get?(name: string): unknown
 }
 
 /** 后续任务尚未实现的能力被调用时抛出。 */
@@ -422,10 +432,11 @@ export class AgentHost extends Service<never> implements AgentHostService {
     })
 
     try {
+      // 工具真正落盘到 ctx.tools 必须先于 active 快照：注册失败不留半个激活领域。
+      this.registerTools(validated.tools, validated.toolNames, registry, logger)
       this.current = active
-      // 本任务唯一已实现的装配步骤：active 快照。后续任务把 scheduler / tools /
-      // persona / firmwareSkills / skillProvider 的 teardown 加到对应阶段即可，
-      // 无需改动 dispose 逻辑。
+      // 后续任务把 scheduler / persona / firmwareSkills / skillProvider 的 teardown
+      // 加到对应阶段即可，无需改动 dispose 逻辑。
       registry.add('active', 'clear active domain', () => {
         if (this.current === active) this.current = undefined
       })
@@ -435,6 +446,89 @@ export class AgentHost extends Service<never> implements AgentHostService {
     }
 
     return disposable
+  }
+
+  /**
+   * 把领域声明的工具逐个注册到 `ctx.tools`，并把 unregister 压入 teardown 的
+   * `tools` 阶段（同阶段 LIFO ⇒ dispose 时逆序反注册）。
+   *
+   * 失败语义：
+   *   - 重名（含 `ctx.tools` 已注册的同名工具）→ 抛契约错误并列出冲突名；
+   *   - 任一工具注册失败 → 回滚已注册的工具，再抛契约错误（错误信息含已回滚
+   *     的工具名与底层原因）。
+   *
+   * 降级：`tools` 服务缺失（或不是 dsh-tools 注册表）时只 `warn`，与既有
+   * “基础设施缺失不阻断安装”的契约一致（见类注释）。
+   */
+  private registerTools(
+    tools: readonly ToolDefinition[],
+    toolNames: readonly string[],
+    registry: TeardownRegistry,
+    logger: DomainLogger,
+  ): void {
+    const native = readService(this.ctx, 'tools')
+    const target =
+      native && typeof native === 'object' && typeof (native as ToolRegistryLike).register === 'function'
+        ? (native as ToolRegistryLike)
+        : undefined
+
+    if (!target) {
+      logger.warn('tools 服务缺失或不支持 register()，跳过工具注册（降级继续）')
+      return
+    }
+
+    const conflicts = toolNames.filter((name) => target.get?.(name) !== undefined)
+    if (conflicts.length > 0) {
+      throw new DomainPackValidationError(
+        'tools',
+        `与已注册工具重名：[${conflicts.join(', ')}]`,
+      )
+    }
+
+    const registered: Array<{ name: string; unregister: () => void }> = []
+    let failing = '<unknown>'
+    try {
+      for (const definition of tools) {
+        failing = definition.name
+        const unregister = target.register(definition)
+        if (typeof unregister !== 'function') {
+          throw new TypeError(
+            `ctx.tools.register("${definition.name}") 未返回 unregister 函数（实际为 ${typeof unregister}）`,
+          )
+        }
+        registered.push({ name: definition.name, unregister })
+      }
+    } catch (error) {
+      const rolledBack = this.rollbackTools(registered, logger)
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new DomainPackValidationError(
+        'tools',
+        `注册工具 "${failing}" 失败（冲突/非法工具名，已回滚 [${rolledBack.join(', ')}]）：${detail}`,
+      )
+    }
+
+    // 按注册顺序入栈；同阶段 LIFO ⇒ dispose 时逆序反注册。
+    for (const entry of registered) {
+      registry.add('tools', `unregister tool "${entry.name}"`, entry.unregister)
+    }
+  }
+
+  /** 逆序反注册；单步失败只 warn，不阻断回滚。返回已成功回滚的工具名。 */
+  private rollbackTools(
+    registered: ReadonlyArray<{ name: string; unregister: () => void }>,
+    logger: DomainLogger,
+  ): string[] {
+    const done: string[] = []
+    for (let index = registered.length - 1; index >= 0; index -= 1) {
+      const entry = registered[index]
+      try {
+        entry.unregister()
+        done.push(entry.name)
+      } catch (error) {
+        logger.warn(`回滚工具 "${entry.name}" 失败`, error)
+      }
+    }
+    return done
   }
 
   private buildCoreSurface(logger: DomainLogger): CoreSurface {

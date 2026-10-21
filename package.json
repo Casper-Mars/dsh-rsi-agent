@@ -45,7 +45,7 @@
   "scripts": {
     "build": "pnpm clean && pnpm typecheck && tsc -p tsconfig.server.json && node scripts/copy-assets.mjs",
     "build:server": "pnpm clean && tsc -p tsconfig.server.json && node scripts/copy-assets.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.type-tests.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "clean": "rm -rf dist dist-server",
     "prepublishOnly": "pnpm build"

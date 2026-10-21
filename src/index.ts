@@ -34,6 +34,8 @@ export type {
   SchedulerSpec,
   SeedSkill,
   ToolDefinition,
+  ToolOutputDefinition,
+  ToolRunContext,
 } from './types.js'
 
 // ---- 服务与装配 ----

@@ -296,6 +296,57 @@ function validateEvolutionPolicy(input: Record<string, unknown>): void {
   }
 }
 
+/**
+ * 工具定义形状校验：与 `@deepseek-ai/dsh-tools` 的 `ToolDefinition` 逐项对齐。
+ *
+ * 为什么在 core 侧提前校验：`ctx.tools.register()` 抛的是 `TypeError`，不带字段
+ * 路径；提前失败能给领域作者**精确字段**，并避免注册到一半才发现。语义不做
+ * JSON Schema 深度校验（那是 dsh-tools 的职责），只校验契约形状。
+ */
+function validateToolShape(item: Record<string, unknown>, index: number): void {
+  const description = item.description
+  if (typeof description !== 'string' || description.length === 0) {
+    fail(`tools()[${index}].description`, `必须是非空字符串，实际为 ${describe(description)}`)
+  }
+
+  if (!isRecord(item.parameters)) {
+    fail(`tools()[${index}].parameters`, `必须是 JSON Schema 对象，实际为 ${describe(item.parameters)}`)
+  }
+
+  const output = item.output
+  if (!isRecord(output)) {
+    fail(
+      `tools()[${index}].output`,
+      `必须声明 { schema, render }（dsh-tools 强制要求），实际为 ${describe(output)}`,
+    )
+  }
+  if (!isRecord(output.schema)) {
+    fail(
+      `tools()[${index}].output.schema`,
+      `必须是 JSON Schema 对象，实际为 ${describe(output.schema)}`,
+    )
+  }
+  if (typeof output.render !== 'function') {
+    fail(
+      `tools()[${index}].output.render`,
+      `必须是函数 (args, value) => ContentBlock[]，实际为 ${describe(output.render)}`,
+    )
+  }
+  if (output.presentationMeta !== undefined && typeof output.presentationMeta !== 'function') {
+    fail(
+      `tools()[${index}].output.presentationMeta`,
+      `若提供必须是函数，实际为 ${describe(output.presentationMeta)}`,
+    )
+  }
+
+  if (typeof item.execute !== 'function') {
+    fail(
+      `tools()[${index}].execute`,
+      `必须是异步函数 (args, exec) => Promise<unknown>，实际为 ${describe(item.execute)}`,
+    )
+  }
+}
+
 function validateTools(
   pack: DomainPack,
   core: CoreSurface,
@@ -328,6 +379,7 @@ function validateTools(
     }
     if (returned.has(name)) fail(field, `工具名 "${name}" 重复`)
     returned.add(name)
+    validateToolShape(item, index)
     tools.push(item as unknown as ToolDefinition)
   })
 

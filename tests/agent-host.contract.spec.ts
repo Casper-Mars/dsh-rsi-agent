@@ -9,6 +9,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { apply } from '../src/plugin'
 import {
   AgentHost,
@@ -18,7 +19,39 @@ import {
   createDefaultCommitPort,
 } from '../src/service'
 import { DomainPackValidationError, PERSONA_MAX_BYTES } from '../src/validate'
-import type { DomainPack } from '../src/types'
+import type { DomainPack, ToolDefinition } from '../src/types'
+
+/**
+ * 构造一个 **符合 dsh-tools 契约** 的工具定义（真实注册表会强校验 output）。
+ *
+ * `overrides` 用于表单点破坏（例如删掉 output、改成非法的 output.schema）。
+ */
+function makeTool(name: string, overrides: Record<string, unknown> = {}): ToolDefinition {
+  return {
+    name,
+    description: `${name} 测试工具`,
+    parameters: {
+      type: 'object',
+      properties: { text: { type: 'string' } },
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: { echoed: { type: 'string' } },
+        required: ['echoed'],
+        additionalProperties: false,
+      },
+      render: (_args: unknown, value: unknown) => [
+        { type: 'text' as const, text: JSON.stringify(value) },
+      ],
+    },
+    execute: async (args: unknown) => ({
+      echoed: String((args as { text?: unknown } | undefined)?.text ?? ''),
+    }),
+    ...overrides,
+  } as unknown as ToolDefinition
+}
 
 /** 合法的基准 pack；反例在此基础上做单点破坏。 */
 function makePack(overrides: Partial<DomainPack> = {}): DomainPack {
@@ -36,7 +69,7 @@ function makePack(overrides: Partial<DomainPack> = {}): DomainPack {
     assetTypes: [{ name: 'notes', prefix: 'notes/' }],
     scheduler: { timezone: 'Asia/Shanghai' },
     evolutionPolicy: { window: '7d', independentCases: 10, maxIterations: 3 },
-    tools: () => [{ name: 'alpha-lookup' }],
+    tools: () => [makeTool('alpha-lookup')],
     toolNames: ['alpha-lookup'],
     ...overrides,
   }
@@ -49,6 +82,34 @@ function createHost(config?: { toolNames?: readonly string[] }): {
 } {
   const ctx = new Context()
   return { ctx, host: new AgentHost(ctx, config) }
+}
+
+/** `systemPrompt` 的 no-op 桩：真实 `ToolRuntime` 声明了 `inject: ['systemPrompt']`。 */
+function systemPromptStub(): Record<string, unknown> {
+  return new Proxy(
+    {},
+    {
+      get: (_target, property) => (property === 'then' ? undefined : () => () => {}),
+    },
+  ) as Record<string, unknown>
+}
+
+/** 等待（最多 `timeoutMs`）直到 `check()` 为真；cordis 服务在微任务中上线。 */
+async function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error('waitFor 超时')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+/** 带**真实 dsh-tools 注册表**的宿主（验证工具真正落到 ctx.tools）。 */
+async function createHostWithRealTools(): Promise<{ ctx: Context; host: AgentHost }> {
+  const ctx = new Context()
+  ctx.provide('systemPrompt', systemPromptStub() as never)
+  ctx.plugin(ToolRuntime)
+  await waitFor(() => ctx.tools !== undefined)
+  return { ctx, host: new AgentHost(ctx) }
 }
 
 /** 安装并断言抛 DomainPackValidationError，且 field / message 均点名该字段。 */
@@ -156,6 +217,26 @@ describe('DomainPack 契约反例', () => {
     ['evolutionPolicy.window 为空', 'evolutionPolicy.window', (p) => {
       p.evolutionPolicy = { window: '  ', independentCases: 3 }
     }],
+    ['tool 缺 output（dsh-tools 必填字段）', 'tools()[0].output', (p) => {
+      p.tools = () => [
+        {
+          name: 'alpha-lookup',
+          description: 'x',
+          parameters: { type: 'object' },
+          execute: async () => ({}),
+        },
+      ]
+    }],
+    ['tool.execute 为同步函数（类型不再允许）', 'tools()[0].execute', (p) => {
+      p.tools = () => [
+        {
+          name: 'alpha-lookup',
+          description: 'x',
+          parameters: { type: 'object' },
+          output: { schema: { type: 'object' }, render: () => [] },
+        },
+      ]
+    }],
   ]
 
   it.each(cases)('%s → 抛错且点名字段', (_label, field, mutate) => {
@@ -182,7 +263,7 @@ describe('工具名一致性', () => {
   it('返回未声明的工具 → 报错并点名未声明工具', () => {
     const { host } = createHost()
     const pack = makePack({
-      tools: () => [{ name: 'alpha-lookup' }, { name: 'extra-tool' }],
+      tools: () => [makeTool('alpha-lookup'), makeTool('extra-tool')],
       toolNames: ['alpha-lookup'],
     })
     let caught: unknown
@@ -199,7 +280,7 @@ describe('工具名一致性', () => {
   it('声明了但未返回 → 报错并点名缺失工具', () => {
     const { host } = createHost()
     const pack = makePack({
-      tools: () => [{ name: 'alpha-lookup' }],
+      tools: () => [makeTool('alpha-lookup')],
       toolNames: ['alpha-lookup', 'missing-tool'],
     })
     let caught: unknown
@@ -216,7 +297,7 @@ describe('工具名一致性', () => {
   it('与 core 重名 → 报错并列出冲突名', () => {
     const { host } = createHost({ toolNames: ['alpha-lookup', 'shared-tool'] })
     const pack = makePack({
-      tools: () => [{ name: 'alpha-lookup' }],
+      tools: () => [makeTool('alpha-lookup')],
       toolNames: ['alpha-lookup'],
     })
     let caught: unknown
@@ -234,7 +315,78 @@ describe('工具名一致性', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 5. 幂等 dispose
+// 5. 工具真实注册（真实 dsh-tools 注册表）
+// ---------------------------------------------------------------------------
+describe('工具真实注册', () => {
+  it('install 后 ctx.tools.get(name) 可执行，dispose 后消失', async () => {
+    const { ctx, host } = await createHostWithRealTools()
+    expect(ctx.tools.get('alpha-lookup')).toBeUndefined()
+
+    const dispose = host.install(makePack())
+    const registered = ctx.tools.get('alpha-lookup')
+    expect(registered, 'install 后 ctx.tools 必须真有该工具（不能只是 active 快照）').toBeDefined()
+    await expect(registered!.execute({ text: 'ping' }, {} as never)).resolves.toEqual({
+      echoed: 'ping',
+    })
+
+    dispose()
+    expect(ctx.tools.get('alpha-lookup')).toBeUndefined()
+    expect(host.active).toBeUndefined()
+
+    // 重复 dispose 不报错，且不影响重新安装。
+    expect(() => dispose()).not.toThrow()
+    const again = host.install(makePack({ version: '2.0.0' }))
+    expect(ctx.tools.get('alpha-lookup')).toBeDefined()
+    again()
+    expect(ctx.tools.get('alpha-lookup')).toBeUndefined()
+  })
+
+  it('与 ctx.tools 已注册工具重名 → 抛契约错误并点名冲突工具', async () => {
+    const { ctx, host } = await createHostWithRealTools()
+    ctx.tools.register(makeTool('core-tool'))
+
+    let caught: unknown
+    try {
+      host.install(makePack({ tools: () => [makeTool('core-tool')], toolNames: ['core-tool'] }))
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(DomainPackValidationError)
+    expect((caught as Error).message).toContain('core-tool')
+    expect(host.active).toBeUndefined()
+    // 原有 core 工具未被破坏。
+    expect(ctx.tools.get('core-tool')).toBeDefined()
+  })
+
+  it('注册中途失败 → 回滚已注册工具、不留 active', async () => {
+    const { ctx, host } = await createHostWithRealTools()
+    // 第二个工具的 output.schema 超出 dsh-tools 支持子集：core 形状校验放行，真注册时被拒。
+    const broken = makeTool('broken-tool', {
+      output: { schema: { type: 'bogus' }, render: () => [] },
+    })
+    const pack = makePack({
+      tools: () => [makeTool('alpha-lookup'), broken],
+      toolNames: ['alpha-lookup', 'broken-tool'],
+    })
+
+    let caught: unknown
+    try {
+      host.install(pack)
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(DomainPackValidationError)
+    expect((caught as Error).field).toBe('tools')
+    expect((caught as Error).message).toContain('broken-tool')
+    expect((caught as Error).message).toContain('已回滚')
+    expect((caught as Error).message).toContain('alpha-lookup')
+    expect(ctx.tools.get('alpha-lookup'), '已注册的工具必须回滚').toBeUndefined()
+    expect(host.active).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6. 幂等 dispose
 // ---------------------------------------------------------------------------
 describe('幂等 dispose', () => {
   it('两次 dispose 不抛错、第二次无副作用、active 清空、可重装', () => {
@@ -261,7 +413,7 @@ describe('幂等 dispose', () => {
 // 6. 逆序拆卸（LIFO）
 // ---------------------------------------------------------------------------
 describe('逆序拆卸', () => {
-  it('当前 install 只登记 active 一步，dispose 仅清空 active', () => {
+  it('当前 install 登记 active + tools 两步，dispose 后均失效', () => {
     const { host } = createHost()
     const dispose = host.install(makePack())
     dispose()

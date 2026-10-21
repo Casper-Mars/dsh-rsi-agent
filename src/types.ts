@@ -9,6 +9,7 @@
  * {@link DOMAIN_API_VERSION}，任何不兼容变更都必须递增该常量。
  */
 import type { Context, Disposable } from '@deepseek-ai/cordis'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 /** 当前 DomainPack 契约版本（`apiVersion` 必须严格等于该值）。 */
 export const DOMAIN_API_VERSION = 1
@@ -91,23 +92,23 @@ export interface DomainSkills {
 }
 
 /**
- * 工具定义的最小结构。
+ * 工具定义 = `@deepseek-ai/dsh-tools` 的公共契约，core **不再**维护影子类型。
  *
- * 具体的 schema / 执行管线由 `@deepseek-ai/dsh-tools` 提供，本任务只要求
- * `tools(ctx, rt)` 返回的每一项具备非空字符串 `name`，并允许携带任意扩展字段。
+ * 该契约要求（dsh-tools `ToolDefinition`）：
+ *   - `name` / `description` / `parameters`（`ToolSchema` 必填）；
+ *   - `output: { schema, render, presentationMeta? }`（必填，注册时强校验）；
+ *   - `execute(args, exec): Promise<unknown>`（**必须异步**，且 `Promise` 结果需
+ *     通过 `output.schema` 校验）。
+ *
+ * 这里是纯类型 re-export：编译产物不含任何 `require('@deepseek-ai/dsh-tools')`，
+ * 因此 `@deepseek-ai/dsh-tools` 仍保持 optional peer 语义；但其 `.d.ts` 会引用该
+ * 包的类型，消费方若需完整类型检查应自行安装（dsh 宿主环境必然具备）。
  */
-export interface ToolDefinition {
-  /** 工具名（面向模型，必须与 `pack.toolNames` 声明一致）。 */
-  name: string
-  /** 可选说明。 */
-  description?: string
-  /** 可选参数 schema（后续任务补齐）。 */
-  parameters?: Record<string, unknown>
-  /** 可选执行函数（后续任务补齐）。 */
-  execute?: (...args: unknown[]) => unknown
-  /** 允许工具携带未在此声明的扩展字段。 */
-  [key: string]: unknown
-}
+export type {
+  ToolDefinition,
+  ToolOutputDefinition,
+  ToolRunContext,
+} from '@deepseek-ai/dsh-tools'
 
 /** `git` 提交端口的一次提交请求。 */
 export interface CommitOptions {
@@ -181,7 +182,12 @@ export interface DomainPack {
   scheduler: SchedulerSpec
   /** 进化策略。 */
   evolutionPolicy: EvolutionPolicy
-  /** 工具工厂：返回本领域要注册的工具定义数组。 */
+  /**
+   * 工具工厂：返回本领域要注册的工具定义数组。
+   *
+   * 返回的每一项都会由 {@link AgentHostService.install} 逐个交给
+   * `ctx.tools.register()`；形状必须与 dsh-tools 的 `ToolDefinition` 完全一致。
+   */
   tools(ctx: Context, rt: DomainRuntime): ToolDefinition[]
   /** 工具名声明，必须与实际返回的工具名集合完全一致。 */
   toolNames: string[]
