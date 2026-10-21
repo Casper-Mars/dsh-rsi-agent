@@ -15,6 +15,8 @@
  * skill provider 与固件 SKILL —— 这些属于后续任务。
  */
 import { Service, type Context, type Disposable } from '@deepseek-ai/cordis'
+import { ensureAssetsRepo } from './assets/repo.js'
+import { createAssetCommitTool } from './assets/tools.js'
 import type { CoreConfig } from './config.js'
 import { createDomainLogger, createDomainRuntime } from './runtime.js'
 import {
@@ -309,6 +311,26 @@ export class AgentHost extends Service<never> implements AgentHostService {
     })
 
     try {
+      // §4.2 装配顺序：runtime → assets 仓库 → core 工具 → 领域工具 → active。
+      // 仓库不可用只 warn（资产能力降级），不阻断领域安装；仓库不随拆卸删除。
+      const repo = ensureAssetsRepo(runtime.home, {
+        assetsDir: runtime.assetsDir,
+        logger: { warn: (message: string) => logger.warn(message) },
+      })
+      if (repo.degraded) {
+        logger.warn(
+          `资产仓库不可用（降级）：${repo.reason ?? '未知原因'}；asset_commit 将返回 degraded:true`,
+        )
+      }
+
+      // core 工具（asset_commit）先注册：领域工具若与之重名，会在下一步的
+      // 重名检查里被点名，从而不留半个激活领域。
+      this.registerCoreTools(
+        [createAssetCommitTool({ runtime, assetTypes: identity.pack.assetTypes })],
+        registry,
+        logger,
+      )
+
       // 工具真正落盘到 ctx.tools 必须先于 active 快照：注册失败不留半个激活领域。
       this.registerTools(validated.tools, validated.toolNames, registry, logger)
       this.current = active
@@ -326,8 +348,28 @@ export class AgentHost extends Service<never> implements AgentHostService {
   }
 
   /**
-   * 把领域声明的工具逐个注册到 `ctx.tools`，并把 unregister 压入 teardown 的
-   * `tools` 阶段（同阶段 LIFO ⇒ dispose 时逆序反注册）。
+   * 注册 core 自带工具（当前仅 `asset_commit`）。
+   *
+   * 复用 {@link registerTools} 的**同一条**注册路径：重名预检（含领域工具
+   * 与 `ctx.tools` 已有工具）、失败回滚、`tools` 阶段反注册。core 工具名同样
+   * 受契约保护，不允许被领域包覆盖。
+   */
+  private registerCoreTools(
+    tools: readonly ToolDefinition[],
+    registry: TeardownRegistry,
+    logger: DomainLogger,
+  ): void {
+    this.registerTools(
+      tools,
+      tools.map((definition) => definition.name),
+      registry,
+      logger,
+    )
+  }
+
+  /**
+   * 把领域声明的工具（以及 core 工具）逐个注册到 `ctx.tools`，并把 unregister
+   * 压入 teardown 的 `tools` 阶段（同阶段 LIFO ⇒ dispose 时逆序反注册）。
    *
    * 失败语义：
    *   - 重名（含 `ctx.tools` 已注册的同名工具）→ 抛契约错误并列出冲突名；
