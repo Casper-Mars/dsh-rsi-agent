@@ -34,6 +34,8 @@ import { AgentHost } from '../src/service'
 import { DomainPackValidationError } from '../src/validate'
 import {
   ASSETS_GITIGNORE,
+  ASSETS_GITIGNORE_BLOCK_END,
+  ASSETS_GITIGNORE_BLOCK_START,
   ASSET_COMMIT_OUTPUT_SCHEMA,
   ASSET_COMMIT_TOOL_NAME,
   AssetPathError,
@@ -98,34 +100,105 @@ describe('assets/git：参数化执行器', () => {
 })
 
 describe('assets/repo：单仓就绪', () => {
-  it('首次调用创建 <home>/assets、git init、写默认 .gitignore，且不产生提交', () => {
+  it('首次调用创建 <home>/assets、git init、写默认 .gitignore 并纳入首次 commit', () => {
     const { home, assetsDir } = sandbox()
     const result = ensureAssetsRepo(home)
 
     expect(result.dir).toBe(assetsDir)
     expect(result.initialized).toBe(true)
     expect(result.degraded).toBe(false)
+    expect(result.gitignore).toBe('created')
     expect(existsSync(join(assetsDir, '.git'))).toBe(true)
     expect(readFileSync(join(assetsDir, '.gitignore'), 'utf8')).toBe(ASSETS_GITIGNORE)
     expect(ASSETS_GITIGNORE).toContain('.DS_Store')
     expect(ASSETS_GITIGNORE).toContain('*.tmp')
     expect(ASSETS_GITIGNORE).toContain('*.log')
 
-    // 只 init、不 commit：HEAD 不存在。
-    expect(() => gitText(['rev-parse', '--verify', 'HEAD'], assetsDir)).toThrow()
+    // `.gitignore` 已入库：恰好 1 个 commit，工作区干净。
+    expect(gitText(['rev-list', '--count', 'HEAD'], assetsDir).trim()).toBe('1')
+    expect(gitText(['log', '-1', '--format=%s'], assetsDir).trim()).toBe(
+      'chore: init assets repository',
+    )
+    expect(gitText(['ls-tree', '--name-only', 'HEAD'], assetsDir).trim()).toBe('.gitignore')
+    expect(gitText(['status', '--porcelain'], assetsDir).trim()).toBe('')
   })
 
-  it('再次调用幂等：不重复 init、不覆盖用户改过的 .gitignore、不产生提交', () => {
+  it('已有自定义 .gitignore：绝不覆盖，只追加缺失忽略项区块（幂等）', () => {
     const { home, assetsDir } = sandbox()
     expect(ensureAssetsRepo(home).initialized).toBe(true)
 
-    writeFileSync(join(assetsDir, '.gitignore'), '# custom\n', 'utf8')
+    writeFileSync(join(assetsDir, '.gitignore'), '# custom\nnode_modules/\n', 'utf8')
     const again = ensureAssetsRepo(home)
 
     expect(again.initialized).toBe(false)
     expect(again.degraded).toBe(false)
-    expect(readFileSync(join(assetsDir, '.gitignore'), 'utf8')).toBe('# custom\n')
-    expect(() => gitText(['rev-parse', '--verify', 'HEAD'], assetsDir)).toThrow()
+    expect(again.gitignore).toBe('appended')
+    const text = readFileSync(join(assetsDir, '.gitignore'), 'utf8')
+    // 用户原文一字不改，保留在最前面。
+    expect(text.startsWith('# custom\nnode_modules/\n')).toBe(true)
+    expect(text).toContain(ASSETS_GITIGNORE_BLOCK_START)
+    expect(text).toContain(ASSETS_GITIGNORE_BLOCK_END)
+    expect(text).toContain('.DS_Store')
+    expect(text).toContain('*.tmp')
+    expect(text).toContain('*.log')
+    // 已有条目（none）不重复追加。
+    expect(text.match(/\*\.log/g)?.length).toBe(1)
+
+    // 改动已入库（init commit + 同步 commit）。
+    expect(gitText(['rev-list', '--count', 'HEAD'], assetsDir).trim()).toBe('2')
+    expect(gitText(['status', '--porcelain'], assetsDir).trim()).toBe('')
+
+    // 再次调用：幂等，不重复追加、不再产生提交。
+    const third = ensureAssetsRepo(home)
+    expect(third.gitignore).toBe('unchanged')
+    expect(readFileSync(join(assetsDir, '.gitignore'), 'utf8')).toBe(text)
+    expect(gitText(['rev-list', '--count', 'HEAD'], assetsDir).trim()).toBe('2')
+  })
+
+  it('预置 .gitignore（init 之前已存在）：不覆盖，且纳入首次 commit（不再恒 dirty）', () => {
+    const { home, assetsDir } = sandbox()
+    mkdirSync(assetsDir, { recursive: true })
+    const preset = '# preset\ndist/\n'
+    writeFileSync(join(assetsDir, '.gitignore'), preset, 'utf8')
+
+    const result = ensureAssetsRepo(home)
+
+    expect(result.initialized).toBe(true)
+    expect(result.gitignore).toBe('appended')
+    const text = readFileSync(join(assetsDir, '.gitignore'), 'utf8')
+    expect(text.startsWith(preset)).toBe(true)
+    expect(text).toContain(ASSETS_GITIGNORE_BLOCK_START)
+    expect(gitText(['rev-list', '--count', 'HEAD'], assetsDir).trim()).toBe('1')
+    expect(gitText(['log', '-1', '--format=%s'], assetsDir).trim()).toBe(
+      'chore: init assets repository',
+    )
+    expect(gitText(['status', '--porcelain'], assetsDir).trim()).toBe('')
+  })
+
+  it('预置 .gitignore 已含本工具区块：不重复追加，但未追踪时仍纳入首次 commit', () => {
+    const { home, assetsDir } = sandbox()
+    mkdirSync(assetsDir, { recursive: true })
+    const preset = `# preset\n${ASSETS_GITIGNORE_BLOCK_START}\n*.log\n${ASSETS_GITIGNORE_BLOCK_END}\n`
+    writeFileSync(join(assetsDir, '.gitignore'), preset, 'utf8')
+
+    const result = ensureAssetsRepo(home)
+    expect(result.gitignore).toBe('unchanged')
+    expect(readFileSync(join(assetsDir, '.gitignore'), 'utf8')).toBe(preset)
+    expect(gitText(['rev-list', '--count', 'HEAD'], assetsDir).trim()).toBe('1')
+    expect(gitText(['status', '--porcelain'], assetsDir).trim()).toBe('')
+  })
+
+  it('已有 .gitignore 含本工具区块：不重复追加（即便条目被手工删掉）', () => {
+    const { home, assetsDir } = sandbox()
+    expect(ensureAssetsRepo(home).initialized).toBe(true)
+
+    const custom = `# custom\n${ASSETS_GITIGNORE_BLOCK_START}\n*.log\n${ASSETS_GITIGNORE_BLOCK_END}\n`
+    writeFileSync(join(assetsDir, '.gitignore'), custom, 'utf8')
+
+    const again = ensureAssetsRepo(home)
+    expect(again.gitignore).toBe('unchanged')
+    expect(readFileSync(join(assetsDir, '.gitignore'), 'utf8')).toBe(custom)
+    expect(gitText(['rev-list', '--count', 'HEAD'], assetsDir).trim()).toBe('1')
   })
 
   it('git 不可用时 degraded:true + reason，不抛错且不创建 .git', () => {
@@ -161,7 +234,8 @@ describe('assets/commit：写入即 commit', () => {
     expect(result.degraded).toBe(false)
     expect(result.actions).toEqual([{ path: 'records/a.md', action: 'create' }])
     expect(result.sha).toMatch(/^[0-9a-f]{40}$/)
-    expect(gitText(['rev-list', '--count', 'HEAD'], assetsDir).trim()).toBe('1')
+    // 1 个 .gitignore 初始化提交 + 1 个资产提交。
+    expect(gitText(['rev-list', '--count', 'HEAD'], assetsDir).trim()).toBe('2')
     expect(gitText(['log', '-1', '--format=%an <%ae>'], assetsDir).trim()).toBe(
       'dsh-rsi-agent <dsh-rsi-agent@localhost>',
     )

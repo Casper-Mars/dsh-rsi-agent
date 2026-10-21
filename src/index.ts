@@ -96,6 +96,9 @@ export {
   initGitRepo,
   isGitAvailable,
   runGit,
+  runGitBuffer,
+  type GitBufferResult,
+  type GitBufferRunner,
   type GitResult,
   type GitRunner,
   type IsGitAvailableOptions,
@@ -103,10 +106,15 @@ export {
 } from './assets/git.js'
 export {
   ASSETS_GITIGNORE,
+  ASSETS_GITIGNORE_BLOCK_END,
+  ASSETS_GITIGNORE_BLOCK_START,
+  ASSETS_GITIGNORE_ENTRIES,
+  ASSETS_GITIGNORE_HEADER,
   ensureAssetsRepo,
   type AssetsRepoLogger,
   type EnsureAssetsRepoDeps,
   type EnsureAssetsRepoResult,
+  type GitignoreAction,
 } from './assets/repo.js'
 export {
   AssetPathError,
@@ -123,10 +131,48 @@ export {
   ASSET_COMMIT_OUTPUT_SCHEMA,
   ASSET_COMMIT_PARAMETERS,
   ASSET_COMMIT_TOOL_NAME,
+  ASSET_HISTORY_OUTPUT_SCHEMA,
+  ASSET_HISTORY_PARAMETERS,
+  ASSET_HISTORY_TOOL_NAME,
+  ASSET_SHOW_OUTPUT_SCHEMA,
+  ASSET_SHOW_PARAMETERS,
+  ASSET_SHOW_TOOL_NAME,
   createAssetCommitTool,
   createAssetCommitTools,
+  createAssetHistoryTool,
+  createAssetShowTool,
+  createAssetTools,
   type AssetCommitToolDeps,
+  type AssetHistoryToolDeps,
+  type AssetShowToolDeps,
+  type AssetToolsDeps,
 } from './assets/tools.js'
+export {
+  ASSET_HISTORY_DEFAULT_LIMIT,
+  ASSET_HISTORY_MAX_LIMIT,
+  AssetHistoryLimitError,
+  assetHistory,
+  parseAssetHistory,
+  resolveHistoryLimit,
+  type AssetHistoryEntry,
+  type AssetHistoryInput,
+  type AssetHistoryResult,
+  type AssetHistoryRuntime,
+} from './assets/history.js'
+export {
+  ASSET_SHOW_MAX_BUFFER,
+  ASSET_SHOW_MAX_BYTES,
+  ASSET_SHOW_SHA_PATTERN,
+  AssetShaError,
+  AssetShowError,
+  assetShow,
+  assertAssetSha,
+  decodeTruncatedUtf8,
+  validUtf8PrefixLength,
+  type AssetShowInput,
+  type AssetShowResult,
+  type AssetShowRuntime,
+} from './assets/show.js'
 
 // ---- 校验 ----
 export {

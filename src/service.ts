@@ -16,7 +16,7 @@
  */
 import { Service, type Context, type Disposable } from '@deepseek-ai/cordis'
 import { ensureAssetsRepo } from './assets/repo.js'
-import { createAssetCommitTool } from './assets/tools.js'
+import { createAssetTools } from './assets/tools.js'
 import type { CoreConfig } from './config.js'
 import { createDomainLogger, createDomainRuntime } from './runtime.js'
 import {
@@ -323,10 +323,10 @@ export class AgentHost extends Service<never> implements AgentHostService {
         )
       }
 
-      // core 工具（asset_commit）先注册：领域工具若与之重名，会在下一步的
-      // 重名检查里被点名，从而不留半个激活领域。
+      // core 工具（asset_commit / asset_history / asset_show）先注册：领域工具
+      // 若与之重名，会在下一步的重名检查里被点名，从而不留半个激活领域。
       this.registerCoreTools(
-        [createAssetCommitTool({ runtime, assetTypes: identity.pack.assetTypes })],
+        createAssetTools({ runtime, assetTypes: identity.pack.assetTypes }),
         registry,
         logger,
       )
@@ -348,7 +348,7 @@ export class AgentHost extends Service<never> implements AgentHostService {
   }
 
   /**
-   * 注册 core 自带工具（当前仅 `asset_commit`）。
+   * 注册 core 自带工具（`asset_commit` / `asset_history` / `asset_show`）。
    *
    * 复用 {@link registerTools} 的**同一条**注册路径：重名预检（含领域工具
    * 与 `ctx.tools` 已有工具）、失败回滚、`tools` 阶段反注册。core 工具名同样

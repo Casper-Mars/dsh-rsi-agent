@@ -63,12 +63,29 @@ export interface GitResult {
 /** 可注入的 git 执行器（单测替换用）。签名与 {@link runGit} 一致。 */
 export type GitRunner = (args: readonly string[], cwd: string) => GitResult
 
+/** 原始字节版 git 结果。**所有失败都以值返回**，不抛给业务层。 */
+export interface GitBufferResult {
+  /** 是否成功（退出码 0）。 */
+  ok: boolean
+  /** 标准输出（原始字节，**未经 utf8 解码**）。 */
+  stdout: Buffer
+  /** 标准错误（utf8）。 */
+  stderr: string
+  /** 退出码；进程被信号终止 / 可执行文件缺失 / 超出 maxBuffer 时为 -1。 */
+  code: number
+}
+
+/** 可注入的字节版 git 执行器（单测替换用）。 */
+export type GitBufferRunner = (args: readonly string[], cwd: string) => GitBufferResult
+
 /** {@link runGit} 选项。 */
 export interface RunGitOptions {
   /** 超时（毫秒），缺省 {@link DEFAULT_GIT_TIMEOUT_MS}。 */
   timeoutMs?: number
   /** 环境变量来源，缺省 `process.env`（测试注入用）。 */
   env?: NodeJS.ProcessEnv
+  /** 输出缓冲上限（字节），缺省 16 MiB。 */
+  maxBuffer?: number
 }
 
 /** 固定身份 + 字节保真的 `-c` 参数（每次调用显式传入，不依赖仓库配置）。 */
@@ -151,7 +168,7 @@ export function runGit(
       encoding: 'utf8',
       timeout: options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
       killSignal: 'SIGKILL',
-      maxBuffer: MAX_BUFFER_BYTES,
+      maxBuffer: options.maxBuffer ?? MAX_BUFFER_BYTES,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       env: isolatedEnv(options.env ?? process.env),
@@ -159,6 +176,61 @@ export function runGit(
     return { ok: true, stdout: typeof stdout === 'string' ? stdout : '', stderr: '', code: 0 }
   } catch (error) {
     return failure(error)
+  }
+}
+
+/**
+ * 执行一条 git 命令并保留**原始字节**输出。
+ *
+ * 为什么需要它：`execFileSync(..., { encoding: 'utf8' })` 在解码阶段就会把
+ * 非法 / 被截断的多字节序列替换成 U+FFFD，调用方再也无法按 UTF-8 字符边界
+ * 回退（§9.4 的 256 KB 截断要求）。本函数只负责取字节，解码由业务层完成。
+ *
+ * - 只走 `execFileSync`，argv 逐项传参，不经 shell；
+ * - 超时 / 非零退出 / 超出 `maxBuffer` 一律包装为 `{ ok: false, ... }`，**不抛**。
+ */
+export function runGitBuffer(
+  args: readonly string[],
+  cwd: string,
+  options: RunGitOptions = {},
+): GitBufferResult {
+  try {
+    const stdout = execFileSync('git', [...gitIdentityArgs(), ...args], {
+      cwd,
+      encoding: 'buffer',
+      timeout: options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      maxBuffer: options.maxBuffer ?? MAX_BUFFER_BYTES,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      env: isolatedEnv(options.env ?? process.env),
+    })
+    return {
+      ok: true,
+      stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout), 'utf8'),
+      stderr: '',
+      code: 0,
+    }
+  } catch (error) {
+    const detail = error as {
+      status?: number | null
+      stdout?: unknown
+      stderr?: unknown
+      message?: string
+    }
+    const code = typeof detail?.status === 'number' ? detail.status : -1
+    const stderr = asText(detail?.stderr)
+    return {
+      ok: false,
+      stdout: Buffer.isBuffer(detail?.stdout) ? detail.stdout : Buffer.alloc(0),
+      stderr:
+        stderr !== ''
+          ? stderr
+          : typeof detail?.message === 'string'
+            ? detail.message
+            : String(error),
+      code,
+    }
   }
 }
 
