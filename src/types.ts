@@ -335,6 +335,14 @@ export interface AgentHostService {
   /** 当前激活领域；未安装时为 `undefined`。只读。 */
   readonly active: ActiveDomain | undefined
   /**
+   * 最近一次 `install` 的 SKILL provider 就绪信号（只读）。
+   *
+   * 领域声明了 `skills/` 前缀时，`await` 后 `ctx.skills.list()` 立即可见
+   * provider 贡献的 SKILL；未声明 `skills/`、依赖缺失降级或尚未安装时
+   * 为已 resolve 的 Promise。用于替代不确定的 sleep。
+   */
+  readonly skillProviderReady?: Promise<void>
+  /**
    * 同步安装一个领域包。
    *
    * 契约/基础设施校验全部完成后才写入 `active`；返回的 Disposable 幂等，

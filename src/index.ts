@@ -205,6 +205,17 @@ export {
   type TemplateVars,
 } from './evolution/template.js'
 export {
+  SKILL_ASSET_PREFIX,
+  SKILL_PROVIDER_NAME,
+  hasSkillAssetType,
+  mountSkillFilesystemProvider,
+  mountSkillFilesystemProviderAsync,
+  resolveSkillDir,
+  type MountSkillProviderOptions,
+  type SkillProviderHandle,
+  type SkillProviderMount,
+} from './skills/provider.js'
+export {
   EVOLUTION_SKILL_NAME,
   FIRMWARE_SKILL_NAMES,
   formatAssetTypes,

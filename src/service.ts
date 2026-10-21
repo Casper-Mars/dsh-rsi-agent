@@ -26,6 +26,7 @@ import {
 import { createFirmwareSkillGuard } from './evolution/firmware-guard.js'
 import { registerFirmwareSkills } from './evolution/skills.js'
 import { createDomainLogger, createDomainRuntime } from './runtime.js'
+import { hasSkillAssetType, mountSkillFilesystemProvider } from './skills/provider.js'
 import {
   DOMAIN_API_VERSION,
   type ActiveDomain,
@@ -236,6 +237,8 @@ export class AgentHost extends Service<never> implements AgentHostService {
   private readonly nativeLogger: unknown
   private readonly env: NodeJS.ProcessEnv | undefined
   private current: ActiveDomain | undefined
+  /** 最近一次 install 的 provider 就绪信号；未挂载时为已 resolve。 */
+  private providerReady: Promise<void> = Promise.resolve()
 
   constructor(ctx: Context, config: AgentHostConfig = {}) {
     super(ctx, 'agentHost')
@@ -248,6 +251,19 @@ export class AgentHost extends Service<never> implements AgentHostService {
   /** 当前激活领域；只读访问器，外部无法赋值。 */
   get active(): ActiveDomain | undefined {
     return this.current
+  }
+
+  /**
+   * 最近一次 `install` 的 SKILL provider 就绪信号。
+   *
+   * - 领域声明了 `skills/` 前缀：`await` 后 `ctx.skills.list()` **立即**可见
+   *   provider 贡献的 SKILL（含依赖缺失降级场景，此时为已 resolve）；
+   * - 未声明 / 尚未安装：已 resolve 的 Promise，`await` 不产生等待。
+   *
+   * 只读；由 `install` 内部维护，测试与诊断用它替代 sleep。
+   */
+  get skillProviderReady(): Promise<void> {
+    return this.providerReady
   }
 
   /**
@@ -265,6 +281,8 @@ export class AgentHost extends Service<never> implements AgentHostService {
     }
 
     const logger = options.logger ?? this.logger
+    // 新一轮安装：先归零就绪信号，避免外部读到上一次安装的 Promise。
+    this.providerReady = Promise.resolve()
     const core = this.buildCoreSurface(logger)
 
     // 身份字段先校验，避免用未校验字段构造运行时。
@@ -372,14 +390,35 @@ export class AgentHost extends Service<never> implements AgentHostService {
       })
       runAssetsBootstrap(identity.pack, writer)
 
+      // 可进化 SKILL（§11.1 / §11.2）：领域声明了 `skills/` 前缀才挂 provider。
+      // 同步装配 + 惰性异步加载；依赖缺失 / 挂载失败只 warn 降级（验收 7）。
+      // 注销压入 `skillProvider` 阶段，`registry.dispose()` 时同步触发。
+      if (hasSkillAssetType(identity.pack.assets.types)) {
+        const provider = mountSkillFilesystemProvider(this.ctx, {
+          assetsDir: runtime.assetsDir,
+          logger,
+        })
+        this.providerReady = provider.ready
+        registry.add('skillProvider', 'unmount skill provider', () => {
+          void provider.dispose()
+        })
+      }
+
       this.current = active
       // 后续任务把 scheduler / persona / firmwareSkills / skillProvider 的 teardown
       // 加到对应阶段即可，无需改动 dispose 逻辑。
       registry.add('active', 'clear active domain', () => {
         if (this.current === active) this.current = undefined
+        this.providerReady = Promise.resolve()
       })
     } catch (error) {
+      // 不出现「表面成功」：安装失败必须留下 error 日志（含 bootstrap 中途失败）。
+      logger.error(
+        `领域 "${identity.id}" 安装失败，回滚已装配的工具 / 固件 Skill / skill provider`,
+        error,
+      )
       registry.dispose()
+      this.providerReady = Promise.resolve()
       throw error
     }
 
