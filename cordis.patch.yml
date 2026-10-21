@@ -1,0 +1,9 @@
+# dsh-rsi-agent bundle patch —— 单插件（rsi-agent）
+#
+# name 写裸包名 `dsh-rsi-agent`：单插件包，Node 解析到 exports["."]（dist-server/index.js）。
+# inject 必须与 src/plugin.ts 的 inject 完全一致：['tools', 'skills', 'fs']。
+
+- insert:
+    - id: rsi-agent
+      name: dsh-rsi-agent
+      inject: ['tools', 'skills', 'fs']
