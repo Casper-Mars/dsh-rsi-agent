@@ -18,6 +18,11 @@ import { Service, type Context, type Disposable } from '@deepseek-ai/cordis'
 import { ensureAssetsRepo } from './assets/repo.js'
 import { createAssetTools } from './assets/tools.js'
 import type { CoreConfig } from './config.js'
+import {
+  evolutionPolicyOverridesFromPack,
+  mergeEvolutionPolicy,
+} from './evolution/policy.js'
+import { registerFirmwareSkills } from './evolution/skills.js'
 import { createDomainLogger, createDomainRuntime } from './runtime.js'
 import {
   DOMAIN_API_VERSION,
@@ -333,6 +338,21 @@ export class AgentHost extends Service<never> implements AgentHostService {
 
       // 工具真正落盘到 ctx.tools 必须先于 active 快照：注册失败不留半个激活领域。
       this.registerTools(validated.tools, validated.toolNames, registry, logger)
+
+      // 固件 SKILL：静态注册（rsi-evolution 按生效策略渲染）。重名属于契约错误，
+      // 会在 catch 中连同已注册工具一起回滚；`ctx.skills` 缺失只 warn 降级。
+      const firmwareUnregisters = registerFirmwareSkills(this.ctx, {
+        pack: identity.pack,
+        policy: mergeEvolutionPolicy(
+          evolutionPolicyOverridesFromPack(identity.pack.evolutionPolicy),
+        ),
+        assetTypes: identity.pack.assetTypes,
+      })
+      // 按注册顺序入栈；同阶段 LIFO ⇒ dispose 时逆序反注销。
+      for (const unregister of firmwareUnregisters) {
+        registry.add('firmwareSkills', 'unregister firmware skill', unregister)
+      }
+
       this.current = active
       // 后续任务把 scheduler / persona / firmwareSkills / skillProvider 的 teardown
       // 加到对应阶段即可，无需改动 dispose 逻辑。

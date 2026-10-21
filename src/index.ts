@@ -174,6 +174,40 @@ export {
   type AssetShowRuntime,
 } from './assets/show.js'
 
+// ---- 进化引擎（§10：策略 / 模板渲染 / 固件 SKILL） ----
+export {
+  DEFAULT_EVOLUTION_POLICY,
+  EvolutionPolicyValidationError,
+  checkPolicyIndependentCases,
+  checkPolicyNotes,
+  checkPolicyWindow,
+  evolutionPolicyOverridesFromPack,
+  mergeEvolutionPolicy,
+} from './evolution/policy.js'
+// 嵌套生效策略与 `DomainPack.evolutionPolicy`（扁平契约，见上方类型导出）形状不同，
+// 公开导出时改名区分，避免同名冲突。
+export type { EvolutionPolicy as EvolutionPolicyConfig } from './evolution/policy.js'
+export {
+  TEMPLATE_VARIABLES,
+  TemplateRenderError,
+  renderTemplate,
+  type TemplateVariable,
+  type TemplateVars,
+} from './evolution/template.js'
+export {
+  EVOLUTION_SKILL_NAME,
+  FIRMWARE_SKILL_NAMES,
+  formatAssetTypes,
+  loadFirmwareSkills,
+  parseSkillMarkdown,
+  registerFirmwareSkills,
+  type FirmwareSkillName,
+  type LoadedFirmwareSkill,
+  type ParsedSkillMarkdown,
+  type RegisterFirmwareSkillsOptions,
+  type SkillFrontmatter,
+} from './evolution/skills.js'
+
 // ---- 校验 ----
 export {
   DomainPackValidationError,

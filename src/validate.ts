@@ -14,6 +14,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveCoreConfig } from './config.js'
 import {
+  checkPolicyIndependentCases,
+  checkPolicyWindow,
+} from './evolution/policy.js'
+import {
   DOMAIN_API_VERSION,
   type DomainPack,
   type DomainRuntime,
@@ -280,15 +284,15 @@ function validateEvolutionPolicy(input: Record<string, unknown>): void {
     fail('evolutionPolicy', `必须是对象，实际为 ${describe(policy)}`)
   }
 
+  // 规则真源在 `./evolution/policy.js`：与嵌套进化策略共用同一组检查，
+  // 避免「领域包扁平契约」与「进化引擎嵌套策略」各有一套口径。
   const cases = policy.independentCases
-  if (typeof cases !== 'number' || !Number.isInteger(cases) || cases <= 0) {
-    fail('evolutionPolicy.independentCases', `必须是正整数，实际为 ${describe(cases)}`)
-  }
+  const casesDetail = checkPolicyIndependentCases(cases)
+  if (casesDetail) fail('evolutionPolicy.independentCases', casesDetail)
 
   const window = policy.window
-  if (typeof window !== 'string' || window.trim().length === 0) {
-    fail('evolutionPolicy.window', `必须是非空字符串，实际为 ${describe(window)}`)
-  }
+  const windowDetail = checkPolicyWindow(window)
+  if (windowDetail) fail('evolutionPolicy.window', windowDetail)
 
   // 所有数值字段必须 > 0（`independentCases` 已按正整数单独校验）。
   for (const [key, value] of Object.entries(policy)) {

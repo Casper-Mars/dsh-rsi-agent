@@ -3,7 +3,9 @@
  *
  * 1. `src/**` 下的 Markdown 资源（SKILL 指南 / 人设 prompt）按原相对路径复制，
  *    使编译态下 `new URL('./x.md', import.meta.url)` 依然可解析；
- * 2. 仓库根的 `cordis.patch.yml` 复制到 `dist-server/cordis.patch.yml`，
+ * 2. 仓库根的 `skills/`（随包发布的固件 SKILL）整体复制到 `dist-server/skills/`，
+ *    使运行时在发布形态下也能读到固件 SKILL 原文；
+ * 3. 仓库根的 `cordis.patch.yml` 复制到 `dist-server/cordis.patch.yml`，
  *    保证产物目录自包含（bundle 校验与离线分发均可直接读取）。
  *
  * 写入方式：读源 → 写唯一临时文件 → 原子 rename 覆盖目标，幂等且并发安全
@@ -47,6 +49,21 @@ function collectAssets(dir) {
   return results
 }
 
+/** 递归遍历目录，返回全部文件（相对 `baseDir` 的路径；不限制扩展名）。 */
+function collectFiles(dir, baseDir = dir) {
+  const results = []
+  if (!existsSync(dir)) return results
+  for (const entry of readdirSync(dir)) {
+    const abs = path.join(dir, entry)
+    if (statSync(abs).isDirectory()) {
+      results.push(...collectFiles(abs, baseDir))
+    } else {
+      results.push(path.relative(baseDir, abs))
+    }
+  }
+  return results
+}
+
 /** 幂等写入：读源 → 写唯一临时文件 → 原子 rename 覆盖目标。 */
 function copyAssetIdempotent(from, to) {
   mkdirSync(path.dirname(to), { recursive: true })
@@ -74,6 +91,17 @@ for (const rel of collectAssets(srcDir)) {
   copyAssetIdempotent(from, to)
   console.log(`[dsh-rsi-agent-assets] ${path.relative(root, from)} -> ${path.relative(root, to)}`)
   count += 1
+}
+
+const skillsDir = path.join(root, 'skills')
+if (existsSync(skillsDir)) {
+  for (const rel of collectFiles(skillsDir)) {
+    const from = path.join(skillsDir, rel)
+    const to = path.join(outDir, 'skills', rel)
+    copyAssetIdempotent(from, to)
+    console.log(`[dsh-rsi-agent-assets] ${path.relative(root, from)} -> ${path.relative(root, to)}`)
+    count += 1
+  }
 }
 
 const patch = path.join(root, 'cordis.patch.yml')
