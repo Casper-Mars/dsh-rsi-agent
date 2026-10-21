@@ -9,6 +9,8 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: ['tests/**/*.spec.ts', 'tests/**/*.test.ts'],
+    // 隔离 home：单测不得在真实 `~/.dsh-rsi-agent` 下建目录。
+    setupFiles: ['tests/setup-env.ts'],
     passWithNoTests: true,
   },
 })

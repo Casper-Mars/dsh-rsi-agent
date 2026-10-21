@@ -8,9 +8,16 @@
  */
 export { name, apply, inject } from './plugin.js'
 export {
+  CORE_CONFIG_DEFAULTS,
+  CORE_CONFIG_ENV,
   DEFAULT_RSI_AGENT_CONFIG,
+  STARTUP_GRACE_MAX_MS,
+  parseByteSize,
   resolveConfig,
+  resolveCoreConfig,
+  type CoreConfig,
   type LogLevel,
+  type ResolvedCoreConfig,
   type RsiAgentConfig,
 } from './config.js'
 
@@ -41,25 +48,47 @@ export type {
 // ---- 服务与装配 ----
 export {
   AgentHost,
-  NotImplementedError,
   TEARDOWN_ORDER,
   TeardownRegistry,
-  createDefaultCommitPort,
-  createDefaultDomainRuntime,
-  createDomainLogger,
   type AgentHostConfig,
-  type DefaultCommitPortOptions,
-  type DefaultDomainRuntimeOptions,
   type Teardown,
   type TeardownRegistryOptions,
   type TeardownStage,
 } from './service.js'
 
+// ---- Runtime（§7：home / sessionId / 目录布局） ----
+export {
+  CORE_DOMAIN_ID,
+  DEFAULT_SESSION_ID,
+  InvalidSessionIdError,
+  NotImplementedError,
+  PRIVATE_DIR_MODE,
+  RSI_AGENT_HOME_ENV,
+  RSI_AGENT_HOME_NAME,
+  RUNTIME_LAYOUT,
+  SESSION_ID_MAX_LENGTH,
+  SESSION_ID_PATTERN,
+  SHARED_DIR_MODE,
+  createDefaultCommitPort,
+  createDomainLogger,
+  createDomainRuntime,
+  describeSessionIdError,
+  resolveHomeRoot,
+  resolveSessionId,
+  resolveSystemTimezone,
+  resolveTimezone,
+  type CreateDomainRuntimeContext,
+  type CreatedDomainRuntime,
+  type DefaultCommitPortOptions,
+  type DomainRuntimeConfig,
+  type RuntimePack,
+  type SessionIdSources,
+} from './runtime.js'
+
 // ---- 校验 ----
 export {
   DomainPackValidationError,
   PERSONA_MAX_BYTES,
-  SESSION_ID_MAX_LENGTH,
   validateDomainIdentity,
   validateDomainPack,
   type CoreSurface,

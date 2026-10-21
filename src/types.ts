@@ -10,6 +10,7 @@
  */
 import type { Context, Disposable } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { ResolvedCoreConfig } from './config.js'
 
 /** 当前 DomainPack 契约版本（`apiVersion` 必须严格等于该值）。 */
 export const DOMAIN_API_VERSION = 1
@@ -142,18 +143,38 @@ export interface CommitPort {
   commit(options: CommitOptions): Promise<CommitResult>
 }
 
-/** 领域运行时句柄：由宿主创建，领域包只读消费。 */
+/**
+ * 领域运行时句柄：由宿主创建，领域包只读消费。
+ *
+ * 类型**真源**在本文件（纯契约模块）：`runtime.ts` 只是该契约的构造器，
+ * 因此类型定义留在契约层，避免「构造器与契约各说一套」。`runtime.ts` 通过
+ * `CreatedDomainRuntime` 补充它实际保证的具体字段语义。
+ *
+ * 全部路径均为绝对路径（`path.resolve` 归一化），且严格位于 `home` 之下。
+ */
 export interface DomainRuntime {
   /** 运行时遵循的契约版本。 */
   readonly apiVersion: typeof DOMAIN_API_VERSION
-  /** 领域 id。 */
+  /** 领域 id（无领域时为 `core`）。 */
   readonly domainId: string
-  /** 领域版本。 */
+  /** 领域版本（无领域时为 `0.0.0`）。 */
   readonly domainVersion: string
+  /** 本领域 home 目录（`<homeRoot>/<domainId>`）。 */
+  readonly home: string
   /** 本领域使用的会话 id。 */
   readonly sessionId: string
-  /** 资产根目录（绝对路径；本任务不推导目录布局）。 */
+  /** 运行时区（IANA 名称）。 */
+  readonly timezone: string
+  /** 资产根目录（`<home>/assets`）。 */
   readonly assetsDir: string
+  /** 私有数据目录（`<home>/data`，权限 `0o700`）。 */
+  readonly dataDir: string
+  /** 日志目录（`<home>/logs`，权限 `0o700`）。 */
+  readonly logsDir: string
+  /** 工作区目录（`<home>/workspace`）。 */
+  readonly workspaceDir: string
+  /** 已解析的 core 配置（含最终 `homeRoot`）。 */
+  readonly config: ResolvedCoreConfig
   /** 领域日志门面。 */
   readonly logger: DomainLogger
   /** 资产提交端口。 */
@@ -195,9 +216,11 @@ export interface DomainPack {
 
 /** 安装选项。 */
 export interface InstallOptions {
-  /** 资产根目录；缺省为空字符串（目录布局由后续任务决定）。 */
+  /** 工作区根目录（与 `CoreConfig.homeRoot` 同义，优先级更高）。 */
+  home?: string
+  /** 资产根目录覆盖；缺省使用 `<home>/assets`（不创建、不 chmod）。 */
   assetsDir?: string
-  /** 覆盖领域默认会话 id。 */
+  /** 覆盖领域默认会话 id（优先级最高）。 */
   sessionId?: string
   /** 自定义提交端口。 */
   commit?: CommitPort

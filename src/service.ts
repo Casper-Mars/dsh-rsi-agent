@@ -14,19 +14,15 @@
  * 本文件**不**实现 runtime 目录布局、资产 git 仓库、scheduler、persona 渲染、
  * skill provider 与固件 SKILL —— 这些属于后续任务。
  */
-import { accessSync, constants } from 'node:fs'
-import { delimiter, join } from 'node:path'
 import { Service, type Context, type Disposable } from '@deepseek-ai/cordis'
+import type { CoreConfig } from './config.js'
+import { createDomainLogger, createDomainRuntime } from './runtime.js'
 import {
   DOMAIN_API_VERSION,
   type ActiveDomain,
   type AgentHostService,
-  type CommitOptions,
-  type CommitPort,
-  type CommitResult,
   type DomainLogger,
   type DomainPack,
-  type DomainRuntime,
   type InstallOptions,
   type ToolDefinition,
 } from './types.js'
@@ -150,19 +146,36 @@ export interface AgentHostConfig {
   readonly toolNames?: readonly string[]
   /** 缺省资产根目录。 */
   readonly assetsDir?: string
+  /** 插件配置（§14.1）；`install` 的 `options.home/sessionId` 优先级更高。 */
+  readonly config?: Partial<CoreConfig>
+  /** 环境变量来源（仅测试注入；本文件不直接读取环境变量）。 */
+  readonly env?: NodeJS.ProcessEnv
 }
 
-/** 默认提交端口的可注入依赖（便于测试替换 PATH / 平台）。 */
-export interface DefaultCommitPortOptions {
-  /** 环境变量，缺省 `process.env`。 */
-  readonly env?: NodeJS.ProcessEnv
-  /** 平台，缺省 `process.platform`。 */
-  readonly platform?: NodeJS.Platform
-  /** 可执行文件名，缺省 `git`。 */
-  readonly executable?: string
-  /** 可执行性探测，缺省用 `fs.accessSync`。 */
-  readonly isExecutable?: (path: string) => boolean
-}
+/**
+ * 运行时实现已迁至 `./runtime.js`（避免 `service → runtime → service` 循环依赖）。
+ * 这里原样 re-export，保持既有公开 API 与导入路径不变。
+ */
+export {
+  createDefaultCommitPort,
+  createDomainLogger,
+  createDomainRuntime,
+  InvalidSessionIdError,
+  NotImplementedError,
+  RSI_AGENT_HOME_NAME,
+  SESSION_ID_MAX_LENGTH,
+  SESSION_ID_PATTERN,
+  DEFAULT_SESSION_ID,
+  resolveHomeRoot,
+  resolveSessionId,
+  resolveTimezone,
+  type CreatedDomainRuntime,
+  type CreateDomainRuntimeContext,
+  type DefaultCommitPortOptions,
+  type DomainRuntimeConfig,
+  type RuntimePack,
+  type SessionIdSources,
+} from './runtime.js'
 
 /** `ctx.tools` 的最小结构：只依赖 dsh-tools 的公开方法，不引入运行时依赖。 */
 interface ToolRegistryLike {
@@ -170,150 +183,6 @@ interface ToolRegistryLike {
   register(definition: ToolDefinition): () => void
   /** 查当前可见工具；用于注册前的重名预检。 */
   get?(name: string): unknown
-}
-
-/** 后续任务尚未实现的能力被调用时抛出。 */
-export class NotImplementedError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'NotImplementedError'
-  }
-}
-
-function defaultIsExecutable(path: string): boolean {
-  try {
-    accessSync(path, process.platform === 'win32' ? constants.F_OK : constants.X_OK)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function findExecutable(
-  executable: string,
-  env: NodeJS.ProcessEnv,
-  platform: NodeJS.Platform,
-  isExecutable: (path: string) => boolean,
-): string | undefined {
-  const pathValue = env.PATH ?? env.Path ?? ''
-  const extensions =
-    platform === 'win32'
-      ? (env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
-      : ['']
-
-  for (const dir of pathValue.split(delimiter).filter(Boolean)) {
-    for (const extension of extensions) {
-      const candidate = join(dir, `${executable}${extension}`)
-      if (isExecutable(candidate)) return candidate
-    }
-  }
-  return undefined
-}
-
-/**
- * 默认提交端口：实时探测 `git` 是否在 PATH。
- *
- * - 不可用 → `commit()` 返回 `{ degraded: true, reason }`，安装流程不失败；
- * - 可用 → 抛 {@link NotImplementedError}，真正的资产提交由后续任务补齐。
- *
- * 探测不缓存，确保「运行期摘除 PATH 中的 git」能被立刻观察到。
- */
-export function createDefaultCommitPort(options: DefaultCommitPortOptions = {}): CommitPort {
-  const env = options.env ?? process.env
-  const platform = options.platform ?? process.platform
-  const executable = options.executable ?? 'git'
-  const isExecutable = options.isExecutable ?? defaultIsExecutable
-
-  const locate = (): string | undefined => findExecutable(executable, env, platform, isExecutable)
-
-  return {
-    isAvailable(): boolean {
-      return locate() !== undefined
-    },
-    async commit(_options: CommitOptions): Promise<CommitResult> {
-      if (!locate()) {
-        return {
-          degraded: true,
-          reason: `git 不可用：PATH 中未找到可执行文件 "${executable}"`,
-        }
-      }
-      throw new NotImplementedError(
-        '[agentHost] commit 尚未实现：资产仓库提交由后续任务补齐（当前仅打通降级路径）',
-      )
-    },
-  }
-}
-
-/** 日志降级前的告警只输出一次。 */
-let warnedMissingLogger = false
-
-/**
- * 创建领域日志门面。
- *
- * `ctx.logger` 缺失或形态非法时降级到 `console`（技术方案 §4.5：基础设施类
- * 错误 `warn` 后继续）。
- */
-export function createDomainLogger(native: unknown, scope: string): DomainLogger {
-  const prefix = `[${scope}]`
-  const emit = (level: 'error' | 'warn' | 'info' | 'debug') => {
-    return (message: string, meta?: unknown): void => {
-      const method =
-        typeof native === 'object' || typeof native === 'function'
-          ? (native as Record<string, unknown>)[level]
-          : undefined
-      if (typeof method === 'function') {
-        const call = method as (message: string, ...rest: unknown[]) => void
-        if (meta === undefined) call.call(native, `${prefix} ${message}`)
-        else call.call(native, `${prefix} ${message}`, meta)
-        return
-      }
-      const fallback = level === 'error' ? console.error : level === 'warn' ? console.warn : level === 'info' ? console.info : console.debug
-      if (meta === undefined) fallback(`${prefix} ${message}`)
-      else fallback(`${prefix} ${message}`, meta)
-    }
-  }
-
-  if (native === undefined && !warnedMissingLogger) {
-    warnedMissingLogger = true
-    console.warn(`${prefix} ctx.logger 缺失，日志降级到 console`)
-  }
-
-  return {
-    error: emit('error'),
-    warn: emit('warn'),
-    info: emit('info'),
-    debug: emit('debug'),
-  }
-}
-
-/** 最小运行时工厂的选项。 */
-export interface DefaultDomainRuntimeOptions {
-  readonly assetsDir?: string
-  readonly sessionId?: string
-  readonly logger?: DomainLogger
-  readonly commit?: CommitPort
-}
-
-/**
- * 最小领域运行时工厂。
- *
- * 仅回填调用方提供的字段，不推导目录布局、不切 home、不创建任何文件 ——
- * 这些是后续 runtime 任务的职责。
- */
-export function createDefaultDomainRuntime(
-  pack: Pick<DomainPack, 'id' | 'version' | 'defaultSessionId'>,
-  options: DefaultDomainRuntimeOptions = {},
-): DomainRuntime {
-  const logger = options.logger ?? createDomainLogger(undefined, `domain:${pack.id}`)
-  return Object.freeze({
-    apiVersion: DOMAIN_API_VERSION,
-    domainId: pack.id,
-    domainVersion: pack.version,
-    sessionId: options.sessionId ?? pack.defaultSessionId,
-    assetsDir: options.assetsDir ?? '',
-    logger,
-    commit: options.commit ?? createDefaultCommitPort(),
-  })
 }
 
 function readService(ctx: Context, name: string): unknown {
@@ -354,13 +223,16 @@ export class AgentHost extends Service<never> implements AgentHostService {
 
   private readonly config: AgentHostConfig
   private readonly logger: DomainLogger
+  private readonly nativeLogger: unknown
+  private readonly env: NodeJS.ProcessEnv | undefined
   private current: ActiveDomain | undefined
 
   constructor(ctx: Context, config: AgentHostConfig = {}) {
     super(ctx, 'agentHost')
     this.config = config
-    const nativeLogger = readService(ctx, 'logger')
-    this.logger = createDomainLogger(nativeLogger, 'agentHost')
+    this.nativeLogger = readService(ctx, 'logger')
+    this.logger = createDomainLogger(this.nativeLogger, 'agentHost')
+    this.env = config.env
   }
 
   /** 当前激活领域；只读访问器，外部无法赋值。 */
@@ -388,14 +260,19 @@ export class AgentHost extends Service<never> implements AgentHostService {
     // 身份字段先校验，避免用未校验字段构造运行时。
     const identity = validateDomainIdentity(pack)
 
-    const commit = options.commit ?? createDefaultCommitPort()
     const runtime = options.createRuntime
       ? options.createRuntime(identity.pack, this.ctx)
-      : createDefaultDomainRuntime(identity.pack, {
-          assetsDir: options.assetsDir ?? this.config.assetsDir ?? '',
-          sessionId: options.sessionId,
+      : createDomainRuntime(identity.pack, {
+          config: this.config.config,
+          installOptions: {
+            // `AgentHostConfig.assetsDir` 是服务级默认值，优先级低于 install 选项。
+            assetsDir: options.assetsDir ?? this.config.assetsDir,
+            home: options.home,
+            sessionId: options.sessionId,
+          },
           logger,
-          commit,
+          nativeLogger: this.nativeLogger,
+          env: this.env,
         })
 
     // 全量契约校验（含 tools() 返回值与 core 工具重名检查）。

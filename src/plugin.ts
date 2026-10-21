@@ -23,10 +23,11 @@ export const inject = ['tools', 'skills', 'fs']
 
 /** 插件装配入口。 */
 export function apply(ctx: Context, config: Partial<RsiAgentConfig> = {}): void {
+  // 配置只做浅合并后透传给 `agentHost`；完整解析（§14.1 默认值 / 环境变量 /
+  // 范围校验）统一在 `createDomainRuntime` 内完成，避免两处默认值打架。
   const resolved = resolveConfig(config)
-  void resolved
 
   // `agentHost` 是 core 自身提供的服务（不是外部依赖），故不进顶层 `inject`；
   // 以 class plugin 装载，实例随本插件 fiber 卸载自动注销。
-  ctx.plugin(AgentHost)
+  ctx.plugin(AgentHost, { config: resolved })
 }

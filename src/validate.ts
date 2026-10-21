@@ -12,21 +12,25 @@
  * 「校验失败」。
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { resolveCoreConfig } from './config.js'
 import {
   DOMAIN_API_VERSION,
   type DomainPack,
   type DomainRuntime,
   type ToolDefinition,
 } from './types.js'
+import { SESSION_ID_MAX_LENGTH, SESSION_ID_PATTERN } from './runtime.js'
 
 /** 人设 Markdown 的字节上限（64 KB）。 */
 export const PERSONA_MAX_BYTES = 64 * 1024
 
-/** `defaultSessionId` 的长度上限。 */
-export const SESSION_ID_MAX_LENGTH = 128
+/**
+ * `defaultSessionId` 的长度上限 —— 真源在 `./runtime.js`（会话 id 规则由
+ * runtime 统一裁决），此处 re-export 保持既有导入路径不变。
+ */
+export { SESSION_ID_MAX_LENGTH, SESSION_ID_PATTERN } from './runtime.js'
 
 const ID_PATTERN = /^[a-z][a-z0-9-]{1,31}$/
-const SESSION_ID_PATTERN = /^[a-zA-Z0-9._-]+$/
 const KEBAB_CASE_PATTERN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/
 const SEMVER_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
@@ -457,8 +461,14 @@ function createPlaceholderRuntime(pack: DomainPack): DomainRuntime {
     apiVersion: DOMAIN_API_VERSION,
     domainId: typeof pack.id === 'string' ? pack.id : '',
     domainVersion: typeof pack.version === 'string' ? pack.version : '',
+    home: '',
     sessionId: typeof pack.defaultSessionId === 'string' ? pack.defaultSessionId : '',
+    timezone: 'UTC',
     assetsDir: '',
+    dataDir: '',
+    logsDir: '',
+    workspaceDir: '',
+    config: resolveCoreConfig({}, {}),
     logger: {
       error: () => {},
       warn: () => {},
