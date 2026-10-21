@@ -23,6 +23,7 @@ import type { SkillRegistration } from '@deepseek-ai/dsh-skill'
 import type { AssetType, DomainPack } from '../types.js'
 import { createDomainLogger } from '../runtime.js'
 import { DomainPackValidationError } from '../validate.js'
+import { findFirmwareSkillAssetConflicts, SKILL_ASSET_ROOT } from './firmware-guard.js'
 import { FIRMWARE_SKILL_NAMES, type FirmwareSkillName } from './names.js'
 import type { EvolutionPolicy } from './policy.js'
 import { renderTemplate, type TemplateVars } from './template.js'
@@ -67,6 +68,11 @@ export interface RegisterFirmwareSkillsOptions {
   readonly policy: EvolutionPolicy
   /** 领域资产类型（渲染 `{{assets}}` 用）。 */
   readonly assetTypes: readonly AssetType[]
+  /**
+   * 资产根目录（可选）。提供时扫描 `skills/` 下已落盘条目，与固件保留名比对；
+   * 缺省 / 目录不存在时静默跳过（首次安装没有资产目录）。
+   */
+  readonly assetsDir?: string
 }
 
 /** `ctx.skills` 的最小结构：只依赖 dsh-skill 的公开 `register`。 */
@@ -230,6 +236,7 @@ export function formatAssetTypes(assetTypes: readonly AssetType[]): string {
  *
  * - `rsi-evolution` 的正文在注册前用生效策略渲染；其余两个原样注册；
  * - 与领域包 `firmwareSkills[]` 重名 → 抛契约错误并点名；
+ * - 资产目录 `skills/` 下已有同名条目（历史落盘）→ 抛契约错误并点名；
  * - `ctx.skills` 缺失或不支持 `register()` → warn 降级，返回空数组（不中断 install）；
  * - 任一注册失败 → 回滚已注册项后抛契约错误。
  *
@@ -239,7 +246,7 @@ export function registerFirmwareSkills(
   ctx: Context,
   options: RegisterFirmwareSkillsOptions,
 ): Array<() => void> {
-  const { pack, policy, assetTypes } = options
+  const { pack, policy, assetTypes, assetsDir } = options
   const loaded = loadFirmwareSkills()
 
   const declaredNames = new Set<string>()
@@ -249,6 +256,17 @@ export function registerFirmwareSkills(
     throw new DomainPackValidationError(
       'firmwareSkills',
       `固件 SKILL 与领域包已声明的 firmwareSkills 重名（core 内置固件名不可占用）：[${conflicts.join(', ')}]`,
+    )
+  }
+
+  // secondary 防线：本次升级前可能已有同名资产落盘（bootstrap 尚未执行，
+  // 写盘守卫抓不到历史数据）。没有资产目录时静默跳过。
+  const assetConflicts = findFirmwareSkillAssetConflicts(assetsDir)
+  if (assetConflicts.length > 0) {
+    throw new DomainPackValidationError(
+      'firmwareSkills',
+      `资产目录 "${SKILL_ASSET_ROOT}/" 下已存在与 core 内置固件 SKILL 同名的条目：[${assetConflicts.join(', ')}]；` +
+        '固件 SKILL 由 core 静态注册、不落 assets，请先移除这些资产目录',
     )
   }
 

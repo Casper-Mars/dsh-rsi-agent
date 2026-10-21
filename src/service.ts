@@ -23,6 +23,7 @@ import {
   evolutionPolicyOverridesFromPack,
   mergeEvolutionPolicy,
 } from './evolution/policy.js'
+import { createFirmwareSkillGuard } from './evolution/firmware-guard.js'
 import { registerFirmwareSkills } from './evolution/skills.js'
 import { createDomainLogger, createDomainRuntime } from './runtime.js'
 import {
@@ -339,6 +340,8 @@ export class AgentHost extends Service<never> implements AgentHostService {
           evolutionPolicyOverridesFromPack(identity.pack.evolutionPolicy),
         ),
         assetTypes: identity.pack.assets.types,
+        // secondary 防线：拦历史落盘的固件同名资产（首次安装时目录为空）。
+        assetsDir: runtime.assetsDir,
       })
       // 按注册顺序入栈；同阶段 LIFO ⇒ dispose 时逆序反注销。
       for (const unregister of firmwareUnregisters) {
@@ -363,6 +366,9 @@ export class AgentHost extends Service<never> implements AgentHostService {
         runtime,
         assetTypes: identity.pack.assets.types,
         logger: { warn: (message: string) => logger.warn(message) },
+        // primary 防线：bootstrap 在固件注册之后执行，只有写盘边界能在
+        // **首次安装**时拦住 `skills/<固件名>/...`（校验阶段拒绝 ⇒ 整批零副作用）。
+        guard: createFirmwareSkillGuard(),
       })
       runAssetsBootstrap(identity.pack, writer)
 

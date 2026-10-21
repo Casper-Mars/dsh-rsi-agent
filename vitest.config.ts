@@ -12,5 +12,8 @@ export default defineConfig({
     // 隔离 home：单测不得在真实 `~/.dsh-rsi-agent` 下建目录。
     setupFiles: ['tests/setup-env.ts'],
     passWithNoTests: true,
+    // 资产仓库相关用例会真实起 git 子进程（install / commit / 回滚），并行
+    // worker 下偶发超过 5s 默认值；放宽到 15s，避免把机器负载误判为逻辑失败。
+    testTimeout: 15_000,
   },
 })

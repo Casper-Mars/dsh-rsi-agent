@@ -27,6 +27,9 @@
  *      `records/A.md` 与 `records/a.md` 是同一个目录项。批内折叠后重复、
  *      或与磁盘已有条目「仅大小写不同」一律在**写盘前**拒绝，避免内容被静默
  *      覆盖（大小写敏感文件系统上也按同一规则处理，保证跨平台行为一致）。
+ *   8. **可插拔路径守卫**：`guard` 在**写盘前**逐条调用，返回字符串即拒绝
+ *      并作为原因。守卫是纯函数，本模块不赋予它任何领域语义（「哪些路径
+ *      属于保留路径」由调用方决定）；拒绝同样发生在校验阶段，整批零副作用。
  */
 import {
   existsSync,
@@ -69,7 +72,19 @@ export interface CreateAssetWriterOptions {
   git?: GitRunner
   /** git 命令超时。 */
   timeoutMs?: number
+  /**
+   * 写盘前的路径守卫（可选）。
+   *
+   * 入参是**已通过白名单归一化**的资产相对路径（`/` 分隔）。返回字符串
+   * 表示拒绝，字符串即拒绝原因（会写进 {@link AssetRegisterError}）；返回
+   * `undefined` 表示放行。守卫在校验阶段调用，任一 spec 被拒不产生任何
+   * 文件 / commit 副作用。
+   */
+  guard?: AssetPathGuard
 }
+
+/** 资产路径守卫：返回拒绝原因，或 `undefined` 放行。 */
+export type AssetPathGuard = (path: string) => string | undefined
 
 /** 资产写入器通用错误（`list` / `read` 的契约错误）。 */
 export class AssetWriterError extends Error {
@@ -194,6 +209,10 @@ export function createAssetWriter(options: CreateAssetWriterOptions): AssetWrite
   if (!Array.isArray(assetTypes)) {
     throw new TypeError('[assets] createAssetWriter 需要 assetTypes 数组')
   }
+  const guard = options.guard
+  if (guard !== undefined && typeof guard !== 'function') {
+    throw new TypeError('[assets] createAssetWriter 的 guard 必须是函数')
+  }
 
   const logger = options.logger ?? runtime.logger
   const warn = warnOf(logger)
@@ -305,6 +324,19 @@ export function createAssetWriter(options: CreateAssetWriterOptions): AssetWrite
         `${at}.path "${path}" 同时命中类型 "${foreign.name}" 的 prefix "${foreign.prefix}"；` +
           '资产路径必须且只能属于一个类型',
       )
+    }
+
+    // 调用方注入的路径守卫：在校验阶段拒绝，保证整批零副作用。
+    if (guard !== undefined) {
+      const rejection = guard(path)
+      if (rejection !== undefined) {
+        if (typeof rejection !== 'string') {
+          throw new AssetRegisterError(
+            `${at}.path "${path}" 的 guard 返回值必须是字符串或 undefined`,
+          )
+        }
+        throw new AssetRegisterError(`${at}.path "${path}" 被拒绝：${rejection}`)
+      }
     }
 
     const content = spec.content

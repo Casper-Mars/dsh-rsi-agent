@@ -231,7 +231,7 @@ function validateFirmwareSkills(input: Record<string, unknown>): void {
 /**
  * 拦截已废弃的顶层 `skills` 字段（技术方案 §4.5「契约错误要响亮」）。
  *
- * 为什么必须显式报错：旧契约用 `skills: { evolvable, firmware }` 表达种子资产
+ * 为什么必须显式报错：旧契约用顶层 `skills` 字段同时表达种子资产
  * 与固件 SKILL。注册式契约启用后，该字段若被静默忽略，领域作者会得到
  * 「install 成功但种子资产全部丢失」的假成功 —— 静默的数据缺失比直接失败
  * 更难排查。因此只要出现该键（无论值是否合法）立即失败，并给出替代写法。
