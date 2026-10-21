@@ -6,7 +6,10 @@
  *      `a/` 与 `ab/` 合法；
  *   2. `bootstrap` 返回 thenable → install 失败（错误点名 `bootstrap`）；
  *   3. 领域 `validate` 抛错 → install 失败，**原始错误信息透传**；
- *   4. 批量原子性：一条 spec 非法 ⇒ 同批次合法 spec 也不落盘；
+ *   4. 批量原子性：一条 spec 非法 ⇒ 同批次合法 spec 也不落盘；写盘阶段失败
+ *      ⇒ 本批已写入文件回滚（新建删除 / 覆盖恢复），无 commit、工作区干净；
+ *   4.1 大小写折叠唯一：批内仅大小写不同、或与磁盘已有条目仅大小写不同 ⇒
+ *      写盘前拒绝并点名两条路径（APFS 大小写不敏感）；
  *   5. seed 幂等 / upsert（内容变化才覆盖）/ 一次 register 一个 commit；
  *   6. 废弃的顶层 `skills` 字段 → 响亮失败（不得静默丢弃种子资产）；
  *   7. `list` / `read` 的路径白名单（`..`、绝对路径）与越界读取拒绝。
@@ -14,7 +17,15 @@
  * 全部文件操作都在 `mkdtemp` 沙箱内，不触碰真实 `~/.dsh-rsi-agent`。
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -24,12 +35,13 @@ import type { SkillRegistration } from '@deepseek-ai/dsh-skill'
 import { AgentHost } from '../src/service'
 import {
   AssetPathError,
+  AssetRegisterError,
   createAssetWriter,
   ensureAssetsRepo,
   runGit,
 } from '../src/index'
 import { DomainPackValidationError } from '../src/validate'
-import type { AssetType, DomainPack, ToolDefinition } from '../src/types'
+import type { AssetSpec, AssetType, DomainPack, ToolDefinition } from '../src/types'
 
 const TYPES: AssetType[] = [
   { name: 'record', prefix: 'records/' },
@@ -101,6 +113,29 @@ function commitCount(assetsDir: string): number {
   const result = runGit(['rev-list', '--count', 'HEAD'], assetsDir)
   if (!result.ok) return 0
   return Number(result.stdout.trim())
+}
+
+/** 在 assetsDir 内执行 git 并返回去尾空白的 stdout（断言用）。 */
+function gitText(args: readonly string[], cwd: string): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
+}
+
+/** assets 目录下的文件快照（排除 `.git`，按路径排序）——断言「一个字节都没写」。 */
+function snapshotFiles(dir: string): string[] {
+  const files: string[] = []
+  const walk = (base: string, prefix: string): void => {
+    for (const item of readdirSync(base, { withFileTypes: true })) {
+      if (item.name === '.git') continue
+      const rel = prefix === '' ? item.name : `${prefix}/${item.name}`
+      if (item.isDirectory()) {
+        walk(join(base, item.name), rel)
+        continue
+      }
+      files.push(rel)
+    }
+  }
+  walk(dir, '')
+  return files.sort()
 }
 
 describe('前缀重叠（按路径段判定）', () => {
@@ -268,6 +303,73 @@ describe('批量原子性', () => {
     expect(existsSync(join(assetsDir, 'elsewhere', 'bad.md'))).toBe(false)
   })
 
+  it('整批拒绝 → assets 下无新增文件、无新增 commit、工作区保持干净', () => {
+    const { assetsDir, writer } = setup()
+    const before = commitCount(assetsDir)
+    const filesBefore = snapshotFiles(assetsDir)
+
+    expect(() =>
+      writer.register([
+        { type: 'record', path: 'records/legal.md', content: 'legal' },
+        { type: 'record', path: 'records/../escape.md', content: 'escape' },
+      ]),
+    ).toThrow(AssetPathError)
+
+    // 验收 4：非法项让整批短路——合法项同样不落盘、不产生 commit。
+    expect(commitCount(assetsDir)).toBe(before)
+    expect(snapshotFiles(assetsDir)).toEqual(filesBefore)
+    expect(existsSync(join(assetsDir, 'records', 'legal.md'))).toBe(false)
+    expect(existsSync(join(assetsDir, 'escape.md'))).toBe(false)
+    expect(gitText(['status', '--porcelain'], assetsDir)).toBe('')
+  })
+
+  it('写盘阶段失败（父路径是文件）→ 已写入文件回滚、无 commit、工作区干净', () => {
+    const { assetsDir, writer } = setup()
+    // 预置一个与目录同名的普通文件：`records/blocker/x.md` 会在 mkdir 阶段 EEXIST。
+    mkdirSync(join(assetsDir, 'records'), { recursive: true })
+    writeFileSync(join(assetsDir, 'records', 'blocker'), 'x')
+    execFileSync('git', ['add', '--', 'records/blocker'], { cwd: assetsDir })
+    execFileSync('git', ['commit', '-m', 'test: blocker'], { cwd: assetsDir })
+
+    const before = commitCount(assetsDir)
+    const filesBefore = snapshotFiles(assetsDir)
+
+    expect(() =>
+      writer.register([
+        { type: 'record', path: 'records/ok.md', content: 'ok' },
+        { type: 'record', path: 'records/blocker/x.md', content: 'x' },
+      ]),
+    ).toThrow()
+
+    // M1：前一条已落盘的 ok.md 必须被回滚，且不留暂存 / 未跟踪文件。
+    expect(commitCount(assetsDir)).toBe(before)
+    expect(snapshotFiles(assetsDir)).toEqual(filesBefore)
+    expect(existsSync(join(assetsDir, 'records', 'ok.md'))).toBe(false)
+    expect(gitText(['status', '--porcelain'], assetsDir)).toBe('')
+  })
+
+  it('覆盖已有文件后失败 → 原内容逐字节恢复、无新 commit、工作区干净', () => {
+    const { assetsDir, writer } = setup()
+    writer.register({ type: 'record', path: 'records/keep.md', content: 'v1' })
+    writeFileSync(join(assetsDir, 'records', 'blocker'), 'x')
+    execFileSync('git', ['add', '--', 'records/blocker'], { cwd: assetsDir })
+    execFileSync('git', ['commit', '-m', 'test: blocker'], { cwd: assetsDir })
+
+    const before = commitCount(assetsDir)
+
+    expect(() =>
+      writer.register([
+        { type: 'record', path: 'records/keep.md', content: 'v2', mode: 'upsert' },
+        { type: 'record', path: 'records/blocker/x.md', content: 'x' },
+      ]),
+    ).toThrow()
+
+    // 覆盖写已发生，回滚必须恢复原字节（不是删除，也不是留 v2）。
+    expect(readFileSync(join(assetsDir, 'records', 'keep.md'), 'utf8')).toBe('v1')
+    expect(commitCount(assetsDir)).toBe(before)
+    expect(gitText(['status', '--porcelain'], assetsDir)).toBe('')
+  })
+
   it('领域 validate 在写盘前执行：同批次后续 spec 失败不影响前面的判定，但整批不写', () => {
     const { assetsDir } = setup()
     const writer = createAssetWriter({
@@ -294,7 +396,107 @@ describe('批量原子性', () => {
   })
 })
 
+describe('大小写折叠唯一（APFS 大小写不敏感）', () => {
+  it('批内仅大小写不同 → 写盘前拒绝，点名两条路径且零副作用', () => {
+    const { assetsDir, writer } = setup()
+    const before = commitCount(assetsDir)
+    const filesBefore = snapshotFiles(assetsDir)
+
+    let caught: unknown
+    try {
+      writer.register([
+        { type: 'record', path: 'records/A.md', content: 'ONE' },
+        { type: 'record', path: 'records/a.md', content: 'TWO' },
+      ])
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(AssetRegisterError)
+    expect((caught as Error).message).toContain('records/A.md')
+    expect((caught as Error).message).toContain('records/a.md')
+    // M2：拒绝发生在写盘前——任何一个大小写都不该落盘。
+    expect(snapshotFiles(assetsDir)).toEqual(filesBefore)
+    expect(commitCount(assetsDir)).toBe(before)
+    expect(gitText(['status', '--porcelain'], assetsDir)).toBe('')
+  })
+
+  it('磁盘已有 records/A.md → 注册 records/a.md 被拒绝且原内容不变', () => {
+    const { assetsDir, writer } = setup()
+    writer.register({ type: 'record', path: 'records/A.md', content: 'ONE' })
+    const before = commitCount(assetsDir)
+    const filesBefore = snapshotFiles(assetsDir)
+
+    let caught: unknown
+    try {
+      writer.register({ type: 'record', path: 'records/a.md', content: 'TWO' })
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(AssetRegisterError)
+    expect((caught as Error).message).toContain('records/A.md')
+    expect((caught as Error).message).toContain('records/a.md')
+    expect(readFileSync(join(assetsDir, 'records', 'A.md'), 'utf8')).toBe('ONE')
+    expect(snapshotFiles(assetsDir)).toEqual(filesBefore)
+    expect(commitCount(assetsDir)).toBe(before)
+    expect(gitText(['status', '--porcelain'], assetsDir)).toBe('')
+  })
+
+  it('磁盘已有 skills/Demo/ → 注册 skills/demo/x.md 被拒绝（父目录大小写不同）', () => {
+    const { assetsDir, writer } = setup()
+    writer.register({ type: 'skill', path: 'skills/Demo/SKILL.md', content: '# demo' })
+    const before = commitCount(assetsDir)
+    const filesBefore = snapshotFiles(assetsDir)
+
+    let caught: unknown
+    try {
+      writer.register({ type: 'skill', path: 'skills/demo/x.md', content: 'x' })
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(AssetRegisterError)
+    expect((caught as Error).message).toContain('skills/Demo/x.md')
+    expect((caught as Error).message).toContain('skills/demo/x.md')
+    expect(snapshotFiles(assetsDir)).toEqual(filesBefore)
+    expect(commitCount(assetsDir)).toBe(before)
+    expect(gitText(['status', '--porcelain'], assetsDir)).toBe('')
+  })
+})
+
 describe('seed 幂等 / upsert / 单次 commit', () => {
+  it('首次 seed → 恰好 1 个 commit，作者固定，message 含 create 与 spec.message', () => {
+    const { assetsDir, writer } = setup()
+    const before = commitCount(assetsDir)
+
+    const [result] = writer.register({
+      type: 'record',
+      path: 'records/first.md',
+      content: '# first',
+      message: '初始化第一条记录',
+    })
+
+    expect(result.status).toBe('created')
+    expect(typeof result.sha).toBe('string')
+    // 验收 1：一次注册只产生一个 commit，HEAD 就是返回的 sha。
+    expect(commitCount(assetsDir)).toBe(before + 1)
+    expect(gitText(['rev-parse', 'HEAD'], assetsDir)).toBe(result.sha)
+
+    // 作者 / 提交者均来自固定身份，不读宿主机 git config。
+    expect(gitText(['log', '-1', '--format=%an <%ae>'], assetsDir)).toBe(
+      'dsh-rsi-agent <dsh-rsi-agent@localhost>',
+    )
+    expect(gitText(['log', '-1', '--format=%cn <%ce>'], assetsDir)).toBe(
+      'dsh-rsi-agent <dsh-rsi-agent@localhost>',
+    )
+
+    const message = gitText(['log', '-1', '--format=%B'], assetsDir)
+    expect(message).toContain('初始化第一条记录')
+    expect(message).toContain('create records/first.md')
+    expect(message).toMatch(/assets: create records\/first\.md/)
+  })
+
   it('同内容两次 seed → 第二次全部 skipped，commit 数不变', () => {
     const { assetsDir, writer } = setup()
     const before = commitCount(assetsDir)
@@ -587,4 +789,63 @@ describe('list / read 白名单', () => {
       /未在 assets.types 中声明/,
     )
   })
+
+  it('register 拒绝矩阵：未声明 type / 越出前缀 / 命中其它 type / ../escape.md / 绝对路径', () => {
+    const { assetsDir, writer } = setup()
+    const before = commitCount(assetsDir)
+    const filesBefore = snapshotFiles(assetsDir)
+
+    const cases: ReadonlyArray<{ label: string; spec: AssetSpec; pattern: RegExp }> = [
+      {
+        label: 'type 未声明',
+        spec: { type: 'unknown', path: 'records/x.md', content: 'x' },
+        pattern: /未在 assets.types 中声明/,
+      },
+      {
+        label: 'path 越出前缀',
+        spec: { type: 'record', path: 'elsewhere/x.md', content: 'x' },
+        pattern: /不在任何资产前缀之下/,
+      },
+      {
+        label: 'path 命中其它 type 前缀',
+        spec: { type: 'record', path: 'skills/x/SKILL.md', content: 'x' },
+        pattern: /不在类型 "record"/,
+      },
+      {
+        label: '../escape.md',
+        spec: { type: 'record', path: '../escape.md', content: 'x' },
+        pattern: /\.\./,
+      },
+      {
+        label: '绝对路径',
+        spec: { type: 'record', path: '/tmp/abs.md', content: 'x' },
+        pattern: /绝对路径/,
+      },
+    ]
+
+    for (const { label, spec, pattern } of cases) {
+      expect(() => writer.register(spec), label).toThrow(pattern)
+    }
+
+    // 五次拒绝都发生在写盘 / 提交之前。
+    expect(snapshotFiles(assetsDir)).toEqual(filesBefore)
+    expect(commitCount(assetsDir)).toBe(before)
+  })
+
+  it('路径同时命中其它类型 prefix（前缀重叠）→ writer 兜底拒绝', () => {
+    const { assetsDir } = setup()
+    const writer = createAssetWriter({
+      runtime: { assetsDir },
+      assetTypes: [
+        { name: 'alpha', prefix: 'a/' },
+        { name: 'beta', prefix: 'a/b/' },
+      ],
+    })
+
+    expect(() => writer.register({ type: 'alpha', path: 'a/b/x.md', content: 'x' })).toThrow(
+      /同时命中类型 "beta"/,
+    )
+    expect(existsSync(join(assetsDir, 'a', 'b', 'x.md'))).toBe(false)
+  })
+
 })

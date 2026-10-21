@@ -9,7 +9,10 @@
  *   1. **同步**：`register` 不返回 Promise；`bootstrap` 若返回 thenable 由
  *      `runAssetsBootstrap` 判失败（见 `../validate.js`）。
  *   2. **批量原子**：一次 `register([...])` 先全量校验，任一 spec 失败 ⇒
- *      **一个字节都不写**；全部通过才进入写盘阶段。
+ *      **一个字节都不写**；全部通过才进入写盘阶段。写盘阶段若任一文件失败
+ *      （权限、`EEXIST`、父路径是文件等）⇒ 本批**已写入的文件全部回滚**
+ *      （新建的删除、覆盖的恢复原字节），不留未提交文件与脏工作区；原始错误
+ *      照常抛给调用方。
  *   3. **一次一个 commit**：落盘后统一走 `commitAssets`（唯一 git 入口），
  *      一批文件只产生一个提交；message 含每个路径的动作与各 spec 的 `message`。
  *   4. **幂等**：`seed` 目标已存在 ⇒ `skipped`（`reason: seed already exists`）；
@@ -20,6 +23,10 @@
  *      落在**自己声明的类型**的 prefix 下，且不得命中其它类型的 prefix。
  *   6. **git 降级**：资产已落盘但未进版本库时返回 `degraded: true` + reason，
  *      warn 后继续，不抛错。
+ *   7. **大小写折叠唯一**：目标平台是 macOS（APFS 默认大小写不敏感），
+ *      `records/A.md` 与 `records/a.md` 是同一个目录项。批内折叠后重复、
+ *      或与磁盘已有条目「仅大小写不同」一律在**写盘前**拒绝，避免内容被静默
+ *      覆盖（大小写敏感文件系统上也按同一规则处理，保证跨平台行为一致）。
  */
 import {
   existsSync,
@@ -27,6 +34,8 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  rmdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
@@ -111,6 +120,66 @@ function resolveAssetPath(assetsDir: string, path: string): string {
 }
 
 /**
+ * 大小写折叠键。
+ *
+ * macOS 的 APFS / HFS+ 默认大小写不敏感：`records/A.md` 与 `records/a.md`
+ * 指向同一个目录项，先后写入不会报错，只会**静默覆盖**。本仓统一按
+ * 「折叠后唯一」处理；Linux 等大小写敏感文件系统上也沿用同一规则，
+ * 避免同一份领域包在不同平台表现不一致。
+ */
+function foldCase(path: string): string {
+  return path.toLowerCase()
+}
+
+/** 一条写盘记录，用于失败回滚。 */
+interface WrittenFile {
+  /** 绝对路径。 */
+  readonly file: string
+  /** 写盘前的字节；`undefined` 表示该文件此前不存在（回滚时删除）。 */
+  readonly previous?: Buffer
+}
+
+/** 递归建目录，并记录本次可能新建的目录（由浅到深），供回滚时清理。 */
+function ensureDir(dir: string, createdDirs: string[]): void {
+  const missing: string[] = []
+  let cursor = dir
+  while (!existsSync(cursor)) {
+    missing.push(cursor)
+    const parent = dirname(cursor)
+    if (parent === cursor) break
+    cursor = parent
+  }
+  // 先登记再 mkdir：即使递归创建中途失败，已创建的浅层目录也会被回滚清理。
+  createdDirs.push(...missing.reverse())
+  mkdirSync(dir, { recursive: true })
+}
+
+/** 回滚本批写盘：删除新建文件、恢复被覆盖文件的原始字节，再清理空目录。 */
+function rollbackWrites(applied: readonly WrittenFile[], createdDirs: readonly string[]): string[] {
+  const failures: string[] = []
+  for (const item of [...applied].reverse()) {
+    try {
+      if (item.previous === undefined) {
+        rmSync(item.file, { force: true })
+      } else {
+        writeFileSync(item.file, item.previous)
+      }
+    } catch (error) {
+      failures.push(`${item.file}：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  // 只删除本次新建且已空的目录（rmdir 对非空目录会失败，忽略即可）。
+  for (const dir of [...createdDirs].reverse()) {
+    try {
+      rmdirSync(dir)
+    } catch {
+      // 目录非空 / 从未创建：保留现状。git 不跟踪空目录，不会产生脏状态。
+    }
+  }
+  return failures
+}
+
+/**
  * 创建资产写入器。
  *
  * @param options.runtime 运行时（`assetsDir` 必填）。
@@ -157,6 +226,39 @@ export function createAssetWriter(options: CreateAssetWriterOptions): AssetWrite
       if (!assetType || assetType.name === owner) continue
       if (!isUnderPrefix(pathSegments, prefixSegments(assetType.prefix))) continue
       return assetType
+    }
+    return undefined
+  }
+
+  /**
+   * 在磁盘上按大小写折叠查找与 `path` 冲突的已存在条目。
+   *
+   * 逐段向下走：若某一层的真实文件名与声明大小写不同但折叠后相同，返回
+   * 「磁盘真实相对路径」（用于在错误里点名两条路径）；完全一致或不存在
+   * 返回 `undefined`。
+   */
+  function findDiskCaseConflict(path: string): string | undefined {
+    const segments = segmentsOf(path)
+    const actual: string[] = []
+    let dir = assetsDir
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index] as string
+      let names: string[]
+      try {
+        names = readdirSync(dir).filter((name) => foldCase(name) === foldCase(segment))
+      } catch {
+        // 父目录不存在 / 不可读 ⇒ 没有可冲突的条目。
+        return undefined
+      }
+      if (names.length === 0) return undefined
+      const exact = names.find((name) => name === segment)
+      const chosen = exact ?? (names[0] as string)
+      actual.push(chosen)
+      if (chosen !== segment) {
+        // 保留磁盘真实大小写，剩余段用声明值拼出「磁盘上将被命中的路径」。
+        return [...actual, ...segments.slice(index + 1)].join('/')
+      }
+      dir = join(dir, chosen)
     }
     return undefined
   }
@@ -288,12 +390,55 @@ export function createAssetWriter(options: CreateAssetWriterOptions): AssetWrite
       seen.add(plan.path)
     }
 
-    // 阶段 2：统一落盘。
+    // 大小写折叠检查（写盘前，零副作用）：批内仅大小写不同 ⇒ 直接拒绝。
+    const seenFolded = new Map<string, string>()
+    for (const plan of plans) {
+      const folded = foldCase(plan.path)
+      const previous = seenFolded.get(folded)
+      if (previous !== undefined && previous !== plan.path) {
+        throw new AssetRegisterError(
+          `同一批次内路径仅大小写不同："${previous}" 与 "${plan.path}"；` +
+            '目标平台文件系统大小写不敏感，两者会互相覆盖（按折叠后唯一处理）',
+        )
+      }
+      seenFolded.set(folded, plan.path)
+    }
+
+    // 与磁盘已有条目「仅大小写不同」同样拒绝：APFS 上 `existsSync` 会命中，
+    // 不拦截就会 seed 静默 skipped / upsert 覆盖掉另一个大小写的文件。
+    for (const plan of plans) {
+      const conflict = findDiskCaseConflict(plan.path)
+      if (conflict !== undefined) {
+        throw new AssetRegisterError(
+          `路径 "${plan.path}" 与磁盘已有条目 "${conflict}" 仅大小写不同；` +
+            '目标平台文件系统大小写不敏感，写入会静默覆盖（按折叠后唯一处理）',
+        )
+      }
+    }
+
+    // 阶段 2：统一落盘；任一失败 ⇒ 回滚本批已写入的文件后原样抛错。
     const written = plans.filter((plan) => plan.write)
-    for (const plan of written) {
-      const file = resolveAssetPath(assetsDir, plan.path)
-      mkdirSync(dirname(file), { recursive: true })
-      writeFileSync(file, plan.spec.content, 'utf8')
+    const applied: WrittenFile[] = []
+    const createdDirs: string[] = []
+    try {
+      for (const plan of written) {
+        const file = resolveAssetPath(assetsDir, plan.path)
+        const existed = existsSync(file)
+        // 备份原始字节：写失败时可能已截断文件，必须按字节恢复。
+        const previous = existed ? readFileSync(file) : undefined
+        // 先登记再写：`writeFileSync` 可能在截断/写入中途失败，此时该文件必须
+        // 已在回滚名单里，否则会留下半截内容（新建的）或丢失原内容（被覆盖的）。
+        applied.push({ file, ...(previous === undefined ? {} : { previous }) })
+        ensureDir(dirname(file), createdDirs)
+        writeFileSync(file, plan.spec.content, 'utf8')
+      }
+    } catch (error) {
+      const rollbackFailures = rollbackWrites(applied, createdDirs)
+      if (rollbackFailures.length > 0) {
+        warn(`[assets] register 写盘失败后回滚未完全成功：${rollbackFailures.join('；')}`)
+      }
+      // 原始错误照常抛给调用方（不包裹、不吞）。
+      throw error
     }
 
     // 阶段 3：一次 register 只产生一个 commit（无写入则不提交）。
