@@ -6,6 +6,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveConfig, type RsiAgentConfig } from './config.js'
+import { AgentHost } from './service.js'
 
 /** 插件唯一标识。 */
 export const name = 'rsi-agent'
@@ -23,6 +24,9 @@ export const inject = ['tools', 'skills', 'fs']
 /** 插件装配入口。 */
 export function apply(ctx: Context, config: Partial<RsiAgentConfig> = {}): void {
   const resolved = resolveConfig(config)
-  void ctx
   void resolved
+
+  // `agentHost` 是 core 自身提供的服务（不是外部依赖），故不进顶层 `inject`；
+  // 以 class plugin 装载，实例随本插件 fiber 卸载自动注销。
+  ctx.plugin(AgentHost)
 }
