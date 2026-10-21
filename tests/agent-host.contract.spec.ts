@@ -62,11 +62,13 @@ function makePack(overrides: Partial<DomainPack> = {}): DomainPack {
     displayName: 'Alpha Domain',
     persona: { markdown: () => '# Alpha\n\nYou are alpha.' },
     defaultSessionId: 'session-1',
-    skills: {
-      evolvable: [{ name: 'seed-skill', markdown: '# seed' }],
-      firmware: [{ name: 'firmware-skill', markdown: '# firmware' }],
+    assets: {
+      types: [
+        { name: 'notes', prefix: 'notes/' },
+        { name: 'skill', prefix: 'skills/' },
+      ],
     },
-    assetTypes: [{ name: 'notes', prefix: 'notes/' }],
+    firmwareSkills: [{ name: 'firmware-skill', markdown: '# firmware' }],
     scheduler: { timezone: 'Asia/Shanghai' },
     evolutionPolicy: { window: '7d', independentCases: 10, maxIterations: 3 },
     tools: () => [makeTool('alpha-lookup')],
@@ -188,28 +190,51 @@ describe('DomainPack 契约反例', () => {
       // 2 个 ASCII + 21845 个「中」= 2 + 65535 = 65537 字节
       p.persona = { markdown: () => 'ab' + '中'.repeat(21845) }
     }],
-    ["skill 名 'BadName'", 'skills.evolvable[0].name', (p) => {
-      p.skills = { evolvable: [{ name: 'BadName', markdown: '# x' }] }
+    ["类型名 'BadName'", 'assets.types[0].name', (p) => {
+      p.assets = { types: [{ name: 'BadName', prefix: 'notes/' }] }
     }],
-    ['两个同名 evolvable', 'skills.evolvable[1].name', (p) => {
-      p.skills = {
-        evolvable: [
-          { name: 'dup-skill', markdown: '# a' },
-          { name: 'dup-skill', markdown: '# b' },
+    ['两个同名资产类型', 'assets.types[1].name', (p) => {
+      p.assets = {
+        types: [
+          { name: 'dup-type', prefix: 'notes/' },
+          { name: 'dup-type', prefix: 'records/' },
         ],
       }
     }],
-    ['evolvable 与 firmware 重名', 'skills.firmware[0].name', (p) => {
-      p.skills = {
-        evolvable: [{ name: 'same-skill', markdown: '# a' }],
-        firmware: [{ name: 'same-skill', markdown: '# b' }],
+    ["类型名为保留字 'core'", 'assets.types[0].name', (p) => {
+      p.assets = { types: [{ name: 'core', prefix: 'core/' }] }
+    }],
+    ['assets 缺失', 'assets', (p) => { delete p.assets }],
+    ['assets.types 为空数组', 'assets.types', (p) => { p.assets = { types: [] } }],
+    ['assets.types 非数组', 'assets.types', (p) => { p.assets = { types: {} } }],
+    ['prefix 重叠（a/ 与 a/b/）', 'assets.types[1].prefix', (p) => {
+      p.assets = {
+        types: [
+          { name: 'alpha', prefix: 'a/' },
+          { name: 'beta', prefix: 'a/b/' },
+        ],
       }
     }],
-    ["prefix '../x/'", 'assetTypes[0].prefix', (p) => { p.assetTypes = [{ name: 'x', prefix: '../x/' }] }],
-    ["prefix '.git/x/'", 'assetTypes[0].prefix', (p) => { p.assetTypes = [{ name: 'x', prefix: '.git/x/' }] }],
-    ["prefix 'x'（缺尾斜杠）", 'assetTypes[0].prefix', (p) => { p.assetTypes = [{ name: 'x', prefix: 'x' }] }],
-    ["prefix '/abs/'", 'assetTypes[0].prefix', (p) => { p.assetTypes = [{ name: 'x', prefix: '/abs/' }] }],
-    ['prefix 含反斜杠', 'assetTypes[0].prefix', (p) => { p.assetTypes = [{ name: 'x', prefix: 'a\\b/' }] }],
+    ['firmwareSkills 重名', 'firmwareSkills[1].name', (p) => {
+      p.firmwareSkills = [
+        { name: 'firmware-skill', markdown: '# a' },
+        { name: 'firmware-skill', markdown: '# b' },
+      ]
+    }],
+    ['firmwareSkills 占用 core 内置名', 'firmwareSkills[0].name', (p) => {
+      p.firmwareSkills = [{ name: 'rsi-evolution', markdown: '# 冲突' }]
+    }],
+    ['bootstrap 非函数', 'assets.bootstrap', (p) => {
+      p.assets = { types: [{ name: 'notes', prefix: 'notes/' }], bootstrap: 'nope' }
+    }],
+    ['bootstrap 声明为 async', 'assets.bootstrap', (p) => {
+      p.assets = { types: [{ name: 'notes', prefix: 'notes/' }], bootstrap: async () => {} }
+    }],
+    ["prefix '../x/'", 'assets.types[0].prefix', (p) => { p.assets = { types: [{ name: 'x', prefix: '../x/' }] } }],
+    ["prefix '.git/x/'", 'assets.types[0].prefix', (p) => { p.assets = { types: [{ name: 'x', prefix: '.git/x/' }] } }],
+    ["prefix 'x'（缺尾斜杠）", 'assets.types[0].prefix', (p) => { p.assets = { types: [{ name: 'x', prefix: 'x' }] } }],
+    ["prefix '/abs/'", 'assets.types[0].prefix', (p) => { p.assets = { types: [{ name: 'x', prefix: '/abs/' }] } }],
+    ['prefix 含反斜杠', 'assets.types[0].prefix', (p) => { p.assets = { types: [{ name: 'x', prefix: 'a\\b/' }] } }],
     ["timezone='Not/AZone'", 'scheduler.timezone', (p) => { p.scheduler = { timezone: 'Not/AZone' } }],
     ['evolutionPolicy.independentCases=0', 'evolutionPolicy.independentCases', (p) => {
       p.evolutionPolicy = { window: '7d', independentCases: 0 }

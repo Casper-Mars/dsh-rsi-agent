@@ -8,7 +8,7 @@
  *   - **基础设施类**：`git` 不可用、`ctx.logger` / `agents` / `sessionPersistence`
  *     缺失、skill provider 挂载失败 —— 由调用方 `warn` 后继续，本文件不处理。
  *
- * 错误信息一律带**具体字段路径**（如 `assetTypes[2].prefix`），不使用笼统的
+ * 错误信息一律带**具体字段路径**（如 `assets.types[2].prefix`），不使用笼统的
  * 「校验失败」。
  */
 import type { Context } from '@deepseek-ai/cordis'
@@ -17,8 +17,10 @@ import {
   checkPolicyIndependentCases,
   checkPolicyWindow,
 } from './evolution/policy.js'
+import { FIRMWARE_SKILL_NAMES } from './evolution/names.js'
 import {
   DOMAIN_API_VERSION,
+  type AssetWriter,
   type DomainPack,
   type DomainRuntime,
   type ToolDefinition,
@@ -27,6 +29,23 @@ import { SESSION_ID_MAX_LENGTH, SESSION_ID_PATTERN } from './runtime.js'
 
 /** 人设 Markdown 的字节上限（64 KB）。 */
 export const PERSONA_MAX_BYTES = 64 * 1024
+
+/**
+ * 保留的资产类型名（技术方案 §6「资产类型保留字」）。
+ *
+ * 来源与理由：
+ *   - `core`   —— 无领域时的 `domainId`（`runtime.CORE_DOMAIN_ID`），也是 core
+ *                 自身保留的命名空间，不允许领域包占用；
+ *   - `firmware` —— core 内置固件 SKILL 的保留分区名（`evolution/names.ts`
+ *                 的语义归属），领域包不得用同名类型改写其含义；
+ *   - `assets` —— 资产根目录（`<home>/assets`）自身的名字，作为类型名会与目录
+ *                 语义缠绕，且易写出 `assets/` 这类与根重叠的前缀。
+ */
+export const RESERVED_ASSET_TYPE_NAMES: ReadonlySet<string> = new Set([
+  'core',
+  'firmware',
+  'assets',
+])
 
 /**
  * `defaultSessionId` 的长度上限 —— 真源在 `./runtime.js`（会话 id 规则由
@@ -41,7 +60,7 @@ const SEMVER_PATTERN =
 
 /** 契约校验失败。`field` 指向具体字段路径。 */
 export class DomainPackValidationError extends Error {
-  /** 出错的字段路径（例如 `assetTypes[0].prefix`）。 */
+  /** 出错的字段路径（例如 `assets.types[0].prefix`）。 */
   readonly field: string
 
   constructor(field: string, detail: string) {
@@ -186,78 +205,178 @@ function validatePersona(input: Record<string, unknown>): string {
   return markdown
 }
 
-function validateSkills(input: Record<string, unknown>): void {
-  const skills = input.skills
-  if (!isRecord(skills)) fail('skills', `必须是对象，实际为 ${describe(skills)}`)
-
-  const evolvable = skills.evolvable
-  const firmware = skills.firmware ?? []
-  if (!Array.isArray(evolvable)) {
-    fail('skills.evolvable', `必须是数组，实际为 ${describe(evolvable)}`)
-  }
-  if (!Array.isArray(firmware)) {
-    fail('skills.firmware', `必须是数组，实际为 ${describe(firmware)}`)
+function validateFirmwareSkills(input: Record<string, unknown>): void {
+  const firmwareSkills = input.firmwareSkills ?? []
+  if (!Array.isArray(firmwareSkills)) {
+    fail('firmwareSkills', `必须是数组，实际为 ${describe(firmwareSkills)}`)
   }
 
+  const reserved = new Set<string>(FIRMWARE_SKILL_NAMES)
   const seen = new Set<string>()
-  evolvable.forEach((skill: unknown, index: number) => {
-    const field = `skills.evolvable[${index}].name`
+  firmwareSkills.forEach((skill: unknown, index: number) => {
+    const field = `firmwareSkills[${index}].name`
     if (!isRecord(skill)) fail(field, `SKILL 必须是对象，实际为 ${describe(skill)}`)
     const name = skill.name
     if (typeof name !== 'string' || !KEBAB_CASE_PATTERN.test(name)) {
       fail(field, `必须是 kebab-case（${KEBAB_CASE_PATTERN}），实际为 ${describe(name)}`)
     }
-    if (seen.has(name)) fail(field, `名称 "${name}" 重复（可进化 SKILL 必须全局唯一）`)
-    seen.add(name)
-  })
-
-  firmware.forEach((skill: unknown, index: number) => {
-    const field = `skills.firmware[${index}].name`
-    if (!isRecord(skill)) fail(field, `SKILL 必须是对象，实际为 ${describe(skill)}`)
-    const name = skill.name
-    if (typeof name !== 'string' || name.length === 0) {
-      fail(field, `必须是非空字符串，实际为 ${describe(name)}`)
-    }
-    if (seen.has(name)) {
-      fail(field, `名称 "${name}" 与已声明的 SKILL 重名（可进化与固有 SKILL 不得冲突）`)
+    if (seen.has(name)) fail(field, `名称 "${name}" 重复（firmwareSkills 必须唯一）`)
+    if (reserved.has(name)) {
+      fail(field, `名称 "${name}" 是 core 内置固件 SKILL 保留名，领域包不得占用`)
     }
     seen.add(name)
   })
 }
 
-function validateAssetTypes(input: Record<string, unknown>): void {
-  const assetTypes = input.assetTypes
-  if (!Array.isArray(assetTypes)) {
-    fail('assetTypes', `必须是数组，实际为 ${describe(assetTypes)}`)
+/**
+ * 拦截已废弃的顶层 `skills` 字段（技术方案 §4.5「契约错误要响亮」）。
+ *
+ * 为什么必须显式报错：旧契约用 `skills: { evolvable, firmware }` 表达种子资产
+ * 与固件 SKILL。注册式契约启用后，该字段若被静默忽略，领域作者会得到
+ * 「install 成功但种子资产全部丢失」的假成功 —— 静默的数据缺失比直接失败
+ * 更难排查。因此只要出现该键（无论值是否合法）立即失败，并给出替代写法。
+ */
+function validateNoLegacySkills(pack: Record<string, unknown>): void {
+  if (Object.hasOwn(pack, 'skills')) {
+    const hasFirmwareSkills = Object.hasOwn(pack, 'firmwareSkills')
+    const hint = hasFirmwareSkills
+      ? '；已检测到顶层 firmwareSkills，该字段已生效（无需再写 skills.firmware）'
+      : ''
+
+    fail(
+      'skills',
+      '已废弃：请改用 assets.types 声明前缀，并在 assets.bootstrap 中用 ' +
+        `writer.register 安装可进化资产（firmware skill 请放到顶层 firmwareSkills）${hint}`,
+    )
+  }
+}
+
+/** 前缀 → 路径段（去掉结尾空段）。 */
+function prefixSegments(prefix: string): string[] {
+  return prefix.slice(0, -1).split('/')
+}
+
+/** 两个前缀是否重叠（含包含关系）；按**路径段**比较，不看字符前缀。 */
+function prefixesOverlap(left: readonly string[], right: readonly string[]): boolean {
+  const length = Math.min(left.length, right.length)
+  for (let index = 0; index < length; index += 1) {
+    if (left[index] !== right[index]) return false
+  }
+  return true
+}
+
+function validateAssets(input: Record<string, unknown>): void {
+  const assets = input.assets
+  if (!isRecord(assets)) fail('assets', `必须是对象，实际为 ${describe(assets)}`)
+
+  const types = assets.types
+  if (!Array.isArray(types)) {
+    fail('assets.types', `必须是数组，实际为 ${describe(types)}`)
+  }
+  if (types.length === 0) {
+    fail('assets.types', '至少需要声明 1 个资产类型')
   }
 
-  assetTypes.forEach((assetType: unknown, index: number) => {
+  const names = new Map<string, number>()
+  const prefixes: Array<{ index: number; name: string; segments: string[]; raw: string }> = []
+
+  types.forEach((assetType: unknown, index: number) => {
     if (!isRecord(assetType)) {
-      fail(`assetTypes[${index}]`, `必须是对象，实际为 ${describe(assetType)}`)
+      fail(`assets.types[${index}]`, `必须是对象，实际为 ${describe(assetType)}`)
     }
 
+    const nameField = `assets.types[${index}].name`
     const name = assetType.name
-    if (typeof name !== 'string' || name.length === 0) {
-      fail(`assetTypes[${index}].name`, `必须是非空字符串，实际为 ${describe(name)}`)
+    if (typeof name !== 'string' || !KEBAB_CASE_PATTERN.test(name)) {
+      fail(nameField, `必须是 kebab-case（${KEBAB_CASE_PATTERN}），实际为 ${describe(name)}`)
     }
+    if (RESERVED_ASSET_TYPE_NAMES.has(name)) {
+      fail(
+        nameField,
+        `"${name}" 是保留的资产类型名（${[...RESERVED_ASSET_TYPE_NAMES].join(' / ')}）`,
+      )
+    }
+    const previous = names.get(name)
+    if (previous !== undefined) {
+      fail(nameField, `类型名 "${name}" 重复（首次出现于 assets.types[${previous}]）`)
+    }
+    names.set(name, index)
 
-    const field = `assetTypes[${index}].prefix`
+    const prefixField = `assets.types[${index}].prefix`
     const prefix = assetType.prefix
     if (typeof prefix !== 'string' || prefix.length === 0) {
-      fail(field, `必须是非空字符串，实际为 ${describe(prefix)}`)
+      fail(prefixField, `必须是非空字符串，实际为 ${describe(prefix)}`)
     }
-    if (prefix.startsWith('/')) fail(field, `必须是相对路径，不能以 "/" 开头：${JSON.stringify(prefix)}`)
-    if (!prefix.endsWith('/')) fail(field, `必须以 "/" 结尾：${JSON.stringify(prefix)}`)
-    if (prefix.includes('\\')) fail(field, `不能包含反斜杠：${JSON.stringify(prefix)}`)
-    if (prefix.includes('..')) fail(field, `不能包含 ".."：${JSON.stringify(prefix)}`)
-    if (prefix.includes('.git')) fail(field, `不能包含 ".git"：${JSON.stringify(prefix)}`)
-    if (prefix.includes('\0')) fail(field, `不能包含空字符：${JSON.stringify(prefix)}`)
+    if (prefix.startsWith('/')) fail(prefixField, `必须是相对路径，不能以 "/" 开头：${JSON.stringify(prefix)}`)
+    if (!prefix.endsWith('/')) fail(prefixField, `必须以 "/" 结尾：${JSON.stringify(prefix)}`)
+    if (prefix.includes('\\')) fail(prefixField, `不能包含反斜杠：${JSON.stringify(prefix)}`)
+    if (prefix.includes('..')) fail(prefixField, `不能包含 ".."：${JSON.stringify(prefix)}`)
+    if (prefix.includes('.git')) fail(prefixField, `不能包含 ".git"：${JSON.stringify(prefix)}`)
+    if (prefix.includes('\0')) fail(prefixField, `不能包含空字符：${JSON.stringify(prefix)}`)
 
-    const segments = prefix.slice(0, -1).split('/')
+    const segments = prefixSegments(prefix)
     if (segments.some((segment) => segment.length === 0 || segment === '.')) {
-      fail(field, `路径段不能为空或 "."：${JSON.stringify(prefix)}`)
+      fail(prefixField, `路径段不能为空或 "."：${JSON.stringify(prefix)}`)
     }
+
+    const conflict = prefixes.find((item) => prefixesOverlap(item.segments, segments))
+    if (conflict !== undefined) {
+      fail(
+        prefixField,
+        `前缀 ${JSON.stringify(prefix)}（类型 "${name}"）与类型 "${conflict.name}" 的前缀 ` +
+          `${JSON.stringify(conflict.raw)} 重叠（按路径段判断，不允许包含关系）`,
+      )
+    }
+
+    if (assetType.validate !== undefined && typeof assetType.validate !== 'function') {
+      fail(`assets.types[${index}].validate`, `若提供必须是函数，实际为 ${describe(assetType.validate)}`)
+    }
+
+    prefixes.push({ index, name, segments, raw: prefix })
   })
+
+  const bootstrap = assets.bootstrap
+  if (bootstrap === undefined) return
+  if (typeof bootstrap !== 'function') {
+    fail('assets.bootstrap', `若提供必须是函数，实际为 ${describe(bootstrap)}`)
+  }
+  // 提前拦住最常见的写法错误；真正的 thenable 返回值检查在 runAssetsBootstrap。
+  if ((bootstrap as { constructor?: { name?: string } }).constructor?.name === 'AsyncFunction') {
+    fail('assets.bootstrap', '必须是同步函数（不得声明为 async，返回值不得是 thenable/Promise）')
+  }
+}
+
+/** 判断任意返回值是否为 thenable。 */
+function isThenable(value: unknown): boolean {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false
+  return typeof (value as { then?: unknown }).then === 'function'
+}
+
+/**
+ * 同步执行领域包的 `assets.bootstrap(writer)`。
+ *
+ * 与 `validateDomainPack` 的分工：`validateDomainPack` 只做**形状**校验（含 async 声明
+ * 的提前拦截）；本函数在真实 writer 上执行，负责拦截「普通函数返回 thenable」
+ * 的漏网写法。**bootstrap 内部抛出的错误原样透传**（不做包裹），以便领域作者
+ * 看到自己的原始信息。
+ *
+ * @throws {DomainPackValidationError} 形态非法 / 返回 thenable。
+ * @throws 任何 bootstrap 内部抛出的原始错误。
+ */
+export function runAssetsBootstrap(pack: DomainPack, writer: AssetWriter): void {
+  const bootstrap = pack.assets?.bootstrap
+  if (bootstrap === undefined) return
+  if (typeof bootstrap !== 'function') {
+    fail('assets.bootstrap', `若提供必须是函数，实际为 ${describe(bootstrap)}`)
+  }
+
+  const returned = bootstrap.call(pack.assets, writer)
+  if (isThenable(returned)) {
+    fail(
+      'assets.bootstrap',
+      '必须是同步函数，返回值不得是 thenable/Promise（检测到异步返回值）',
+    )
+  }
 }
 
 function validateScheduler(input: Record<string, unknown>): void {
@@ -440,9 +559,12 @@ export function validateDomainPack(input: unknown, core: CoreSurface = {}): Vali
   const identity = validateDomainIdentity(input)
   const record = input as Record<string, unknown>
 
+  // 先拦废弃字段：它不属于当前契约，越早失败越不容易被后续校验掩盖。
+  validateNoLegacySkills(record)
+
   const personaMarkdown = validatePersona(record)
-  validateSkills(record)
-  validateAssetTypes(record)
+  validateAssets(record)
+  validateFirmwareSkills(record)
   validateScheduler(record)
   validateEvolutionPolicy(record)
 

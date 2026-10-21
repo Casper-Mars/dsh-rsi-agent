@@ -44,8 +44,13 @@ function makePack(overrides: Partial<DomainPack> = {}): DomainPack {
     displayName: 'Alpha 领域',
     persona: { markdown: () => '# Alpha' },
     defaultSessionId: 'session-1',
-    skills: { evolvable: [{ name: 'seed-skill', markdown: '# seed' }] },
-    assetTypes: [{ name: 'notes', prefix: 'notes/', description: '笔记' }],
+    assets: {
+      types: [
+        { name: 'notes', prefix: 'notes/' },
+        { name: 'skill', prefix: 'skills/' },
+      ],
+    },
+    firmwareSkills: [],
     scheduler: { timezone: 'Asia/Shanghai' },
     evolutionPolicy: { window: '7d', independentCases: 10 },
     tools: () => [makeTool('alpha-lookup')],
@@ -112,9 +117,7 @@ describe('固件 SKILL 文件契约', () => {
 
   it('formatAssetTypes 输出可读清单', () => {
     expect(formatAssetTypes([])).toContain('未声明')
-    expect(formatAssetTypes([{ name: 'notes', prefix: 'notes/', description: '笔记' }])).toBe(
-      '- `notes`：`notes/` — 笔记',
-    )
+    expect(formatAssetTypes([{ name: 'notes', prefix: 'notes/' }])).toBe('- `notes`：`notes/`')
   })
 })
 
@@ -135,7 +138,7 @@ describe('install / dispose 接线', () => {
     expect(evolution?.content).toContain('Alpha 领域')
     expect(evolution?.content).toContain('7d')
     expect(evolution?.content).toContain('至少 10 个相互独立的案例')
-    expect(evolution?.content).toContain('- `notes`：`notes/` — 笔记')
+    expect(evolution?.content).toContain('- `notes`：`notes/`')
     // 注册对象不再含 frontmatter
     expect(evolution?.content.trimStart().startsWith('---')).toBe(false)
     expect(evolution?.source).toBe('runtime')
@@ -162,10 +165,7 @@ describe('install / dispose 接线', () => {
     try {
       host.install(
         makePack({
-          skills: {
-            evolvable: [{ name: 'seed-skill', markdown: '# seed' }],
-            firmware: [{ name: 'rsi-evolution', markdown: '# 冲突' }],
-          },
+          firmwareSkills: [{ name: 'rsi-evolution', markdown: '# 冲突' }],
         }),
       )
     } catch (error) {
@@ -174,7 +174,7 @@ describe('install / dispose 接线', () => {
 
     expect(caught).toBeInstanceOf(DomainPackValidationError)
     expect((caught as Error).message).toContain('rsi-evolution')
-    expect((caught as DomainPackValidationError).field).toBe('skills.firmware')
+    expect((caught as DomainPackValidationError).field).toBe('firmwareSkills[0].name')
     expect(table.size).toBe(0)
     expect(host.active).toBeUndefined()
   })

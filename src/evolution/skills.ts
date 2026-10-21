@@ -23,18 +23,15 @@ import type { SkillRegistration } from '@deepseek-ai/dsh-skill'
 import type { AssetType, DomainPack } from '../types.js'
 import { createDomainLogger } from '../runtime.js'
 import { DomainPackValidationError } from '../validate.js'
+import { FIRMWARE_SKILL_NAMES, type FirmwareSkillName } from './names.js'
 import type { EvolutionPolicy } from './policy.js'
 import { renderTemplate, type TemplateVars } from './template.js'
 
-/** 三个固件 SKILL 名（kebab-case，顺序即注册顺序）。 */
-export const FIRMWARE_SKILL_NAMES = Object.freeze([
-  'rsi-evolution',
-  'skill-authorship',
-  'task-authorship',
-] as const)
+/** 三个固件 SKILL 名（kebab-case，顺序即注册顺序）。真源见 `./names.js`。 */
+export { FIRMWARE_SKILL_NAMES }
 
 /** 固件 SKILL 名联合类型。 */
-export type FirmwareSkillName = (typeof FIRMWARE_SKILL_NAMES)[number]
+export type { FirmwareSkillName }
 
 /** 需要模板渲染的固件 SKILL。 */
 export const EVOLUTION_SKILL_NAME = 'rsi-evolution' as const
@@ -64,8 +61,8 @@ export interface ParsedSkillMarkdown {
 
 /** `registerFirmwareSkills` 的入参。 */
 export interface RegisterFirmwareSkillsOptions {
-  /** 领域包（只读使用 id / displayName / skills 声明）。 */
-  readonly pack: Pick<DomainPack, 'id' | 'displayName' | 'skills'>
+  /** 领域包（只读使用 id / displayName / firmwareSkills 声明）。 */
+  readonly pack: Pick<DomainPack, 'id' | 'displayName' | 'firmwareSkills'>
   /** 已合并的生效策略。 */
   readonly policy: EvolutionPolicy
   /** 领域资产类型（渲染 `{{assets}}` 用）。 */
@@ -130,7 +127,7 @@ function resolveSkillsRoot(): string {
     if (existsSync(path.join(root, EVOLUTION_SKILL_NAME, 'SKILL.md'))) return root
   }
   throw new DomainPackValidationError(
-    'skills.firmware',
+    'firmwareSkills',
     `找不到固件 SKILL 目录（已探测：[${candidates.join(', ')}]）`,
   )
 }
@@ -146,7 +143,7 @@ export function loadFirmwareSkills(): LoadedFirmwareSkill[] {
   return FIRMWARE_SKILL_NAMES.map((name) => {
     const file = path.join(root, name, 'SKILL.md')
     if (!existsSync(file)) {
-      throw new DomainPackValidationError('skills.firmware', `固件 SKILL "${name}" 缺失：${file}`)
+      throw new DomainPackValidationError('firmwareSkills', `固件 SKILL "${name}" 缺失：${file}`)
     }
     return { name, content: readFileSync(file, 'utf8'), path: file }
   })
@@ -180,7 +177,7 @@ export function parseSkillMarkdown(markdown: string, source = '<inline>'): Parse
   const match = FRONTMATTER_PATTERN.exec(normalized)
   if (!match) {
     throw new DomainPackValidationError(
-      'skills.firmware',
+      'firmwareSkills',
       `SKILL "${source}" 缺少 YAML frontmatter（需以 "---" 开头）`,
     )
   }
@@ -199,7 +196,7 @@ export function parseSkillMarkdown(markdown: string, source = '<inline>'): Parse
   for (const key of ['name', 'description', 'whenToUse'] as const) {
     if (!fields[key]) {
       throw new DomainPackValidationError(
-        'skills.firmware',
+        'firmwareSkills',
         `SKILL "${source}" 的 frontmatter 缺少非空字段 "${key}"`,
       )
     }
@@ -224,10 +221,7 @@ export function parseSkillMarkdown(markdown: string, source = '<inline>'): Parse
 export function formatAssetTypes(assetTypes: readonly AssetType[]): string {
   if (assetTypes.length === 0) return '（未声明资产类型）'
   return assetTypes
-    .map((assetType) => {
-      const description = assetType.description ? ` — ${assetType.description}` : ''
-      return `- \`${assetType.name}\`：\`${assetType.prefix}\`${description}`
-    })
+    .map((assetType) => `- \`${assetType.name}\`：\`${assetType.prefix}\``)
     .join('\n')
 }
 
@@ -235,7 +229,7 @@ export function formatAssetTypes(assetTypes: readonly AssetType[]): string {
  * 静态注册三个固件 SKILL。
  *
  * - `rsi-evolution` 的正文在注册前用生效策略渲染；其余两个原样注册；
- * - 与领域包 `skills.evolvable[] / skills.firmware[]` 重名 → 抛契约错误并点名；
+ * - 与领域包 `firmwareSkills[]` 重名 → 抛契约错误并点名；
  * - `ctx.skills` 缺失或不支持 `register()` → warn 降级，返回空数组（不中断 install）；
  * - 任一注册失败 → 回滚已注册项后抛契约错误。
  *
@@ -249,13 +243,12 @@ export function registerFirmwareSkills(
   const loaded = loadFirmwareSkills()
 
   const declaredNames = new Set<string>()
-  for (const skill of pack.skills?.evolvable ?? []) declaredNames.add(skill.name)
-  for (const skill of pack.skills?.firmware ?? []) declaredNames.add(skill.name)
+  for (const skill of pack.firmwareSkills ?? []) declaredNames.add(skill.name)
   const conflicts = loaded.map((skill) => skill.name).filter((name) => declaredNames.has(name))
   if (conflicts.length > 0) {
     throw new DomainPackValidationError(
-      'skills.firmware',
-      `固件 SKILL 与领域包已声明的 SKILL 重名（可进化与固有 SKILL 均不可占用）：[${conflicts.join(', ')}]`,
+      'firmwareSkills',
+      `固件 SKILL 与领域包已声明的 firmwareSkills 重名（core 内置固件名不可占用）：[${conflicts.join(', ')}]`,
     )
   }
 
@@ -284,7 +277,7 @@ export function registerFirmwareSkills(
       const parsed = parseSkillMarkdown(skill.content, skill.path)
       if (parsed.frontmatter.name !== skill.name) {
         throw new DomainPackValidationError(
-          'skills.firmware',
+          'firmwareSkills',
           `固件 SKILL 目录名与 frontmatter.name 不一致："${skill.name}" vs "${parsed.frontmatter.name}"（${skill.path}）`,
         )
       }
@@ -326,7 +319,7 @@ export function registerFirmwareSkills(
     if (error instanceof DomainPackValidationError) throw error
     const detail = error instanceof Error ? error.message : String(error)
     throw new DomainPackValidationError(
-      'skills.firmware',
+      'firmwareSkills',
       `注册固件 SKILL 失败（已回滚 [${rolledBack.join(', ')}]）：${detail}`,
     )
   }

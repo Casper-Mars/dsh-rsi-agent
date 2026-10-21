@@ -17,6 +17,7 @@
 import { Service, type Context, type Disposable } from '@deepseek-ai/cordis'
 import { ensureAssetsRepo } from './assets/repo.js'
 import { createAssetTools } from './assets/tools.js'
+import { createAssetWriter } from './assets/writer.js'
 import type { CoreConfig } from './config.js'
 import {
   evolutionPolicyOverridesFromPack,
@@ -35,6 +36,7 @@ import {
 } from './types.js'
 import {
   DomainPackValidationError,
+  runAssetsBootstrap,
   validateDomainIdentity,
   validateDomainPack,
   type CoreSurface,
@@ -316,8 +318,9 @@ export class AgentHost extends Service<never> implements AgentHostService {
     })
 
     try {
-      // §4.2 装配顺序：runtime → assets 仓库 → core 工具 → 领域工具 → active。
-      // 仓库不可用只 warn（资产能力降级），不阻断领域安装；仓库不随拆卸删除。
+      // §4.2 装配顺序：runtime → assets 仓库 → 固件 Skill → core 工具 → 领域工具
+      // → 领域资产 bootstrap → active。仓库不可用只 warn（资产能力降级），不阻断
+      // 领域安装；仓库不随拆卸删除。
       const repo = ensureAssetsRepo(runtime.home, {
         assetsDir: runtime.assetsDir,
         logger: { warn: (message: string) => logger.warn(message) },
@@ -328,17 +331,6 @@ export class AgentHost extends Service<never> implements AgentHostService {
         )
       }
 
-      // core 工具（asset_commit / asset_history / asset_show）先注册：领域工具
-      // 若与之重名，会在下一步的重名检查里被点名，从而不留半个激活领域。
-      this.registerCoreTools(
-        createAssetTools({ runtime, assetTypes: identity.pack.assetTypes }),
-        registry,
-        logger,
-      )
-
-      // 工具真正落盘到 ctx.tools 必须先于 active 快照：注册失败不留半个激活领域。
-      this.registerTools(validated.tools, validated.toolNames, registry, logger)
-
       // 固件 SKILL：静态注册（rsi-evolution 按生效策略渲染）。重名属于契约错误，
       // 会在 catch 中连同已注册工具一起回滚；`ctx.skills` 缺失只 warn 降级。
       const firmwareUnregisters = registerFirmwareSkills(this.ctx, {
@@ -346,12 +338,33 @@ export class AgentHost extends Service<never> implements AgentHostService {
         policy: mergeEvolutionPolicy(
           evolutionPolicyOverridesFromPack(identity.pack.evolutionPolicy),
         ),
-        assetTypes: identity.pack.assetTypes,
+        assetTypes: identity.pack.assets.types,
       })
       // 按注册顺序入栈；同阶段 LIFO ⇒ dispose 时逆序反注销。
       for (const unregister of firmwareUnregisters) {
         registry.add('firmwareSkills', 'unregister firmware skill', unregister)
       }
+
+      // core 工具（asset_commit / asset_history / asset_show）先于领域工具注册：
+      // 领域工具若与之重名，会在下一步的重名检查里被点名，从而不留半个激活领域。
+      this.registerCoreTools(
+        createAssetTools({ runtime, assetTypes: identity.pack.assets.types }),
+        registry,
+        logger,
+      )
+
+      // 工具真正落盘到 ctx.tools 必须先于 active 快照：注册失败不留半个激活领域。
+      this.registerTools(validated.tools, validated.toolNames, registry, logger)
+
+      // 领域自己的资产注册（§11.1）：同步执行；抛错则整个 install 失败，
+      // registry.dispose() 回滚已装配的工具 / 固件 Skill。
+      // 注意：bootstrap 内 register 的资产**不进 teardown**（磁盘资产按 §4.3 保留）。
+      const writer = createAssetWriter({
+        runtime,
+        assetTypes: identity.pack.assets.types,
+        logger: { warn: (message: string) => logger.warn(message) },
+      })
+      runAssetsBootstrap(identity.pack, writer)
 
       this.current = active
       // 后续任务把 scheduler / persona / firmwareSkills / skillProvider 的 teardown

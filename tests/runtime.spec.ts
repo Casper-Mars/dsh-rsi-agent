@@ -365,8 +365,12 @@ function makeBootPack(): DomainPack {
     version: '1.0.0',
     persona: { markdown: () => '# demo' },
     defaultSessionId: 'demo-session',
-    skills: { evolvable: [{ name: 'seed', markdown: '# seed' }] },
-    assetTypes: [{ name: 'notes', prefix: 'notes/' }],
+    assets: {
+      types: [
+        { name: 'notes', prefix: 'notes/' },
+        { name: 'skill', prefix: 'skills/' },
+      ],
+    },
     scheduler: { timezone: 'Asia/Shanghai' },
     evolutionPolicy: { window: '7d', independentCases: 10 },
     tools: () => [tool],

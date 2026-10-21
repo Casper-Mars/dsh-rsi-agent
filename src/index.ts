@@ -26,20 +26,24 @@ export { DOMAIN_API_VERSION } from './types.js'
 export type {
   ActiveDomain,
   AgentHostService,
+  AssetEntry,
+  AssetSpec,
   AssetType,
+  AssetWriter,
   CommitOptions,
   CommitPort,
   CommitResult,
+  DomainAssets,
   DomainLogger,
   DomainPack,
   DomainRuntime,
-  DomainSkills,
   EvolutionPolicy,
   FirmwareSkill,
   InstallOptions,
   PersonaProvider,
+  RegisterResult,
+  RegisterStatus,
   SchedulerSpec,
-  SeedSkill,
   ToolDefinition,
   ToolOutputDefinition,
   ToolRunContext,
@@ -173,6 +177,12 @@ export {
   type AssetShowResult,
   type AssetShowRuntime,
 } from './assets/show.js'
+export {
+  AssetRegisterError,
+  AssetWriterError,
+  createAssetWriter,
+  type CreateAssetWriterOptions,
+} from './assets/writer.js'
 
 // ---- 进化引擎（§10：策略 / 模板渲染 / 固件 SKILL） ----
 export {
@@ -212,6 +222,8 @@ export {
 export {
   DomainPackValidationError,
   PERSONA_MAX_BYTES,
+  RESERVED_ASSET_TYPE_NAMES,
+  runAssetsBootstrap,
   validateDomainIdentity,
   validateDomainPack,
   type CoreSurface,

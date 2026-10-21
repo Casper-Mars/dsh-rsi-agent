@@ -16,33 +16,103 @@ import type { ResolvedCoreConfig } from './config.js'
 export const DOMAIN_API_VERSION = 1
 
 /**
- * 资产类型：描述领域资产目录下的一个相对路径分区。
+ * 资产类型：描述领域资产目录下的一个相对路径分区，并可选地声明内容校验。
  *
- * `prefix` 必须是相对资产根目录的路径前缀，以 `/` 结尾；具体目录布局、
- * 权限与 home 切换由后续 runtime 任务负责，本任务只校验契约形状。
+ * `prefix` 必须是相对资产根目录的路径前缀，以 `/` 结尾；不同类型的前缀
+ * 不得重叠（按**路径段**判断，`a/` 与 `a/b/` 重叠、`a/` 与 `ab/` 不重叠），
+ * 因此任一资产路径最多属于一个类型。
  */
 export interface AssetType {
-  /** 资产类型标识（例如 `notes`、`datasets`）。 */
+  /** 资产类型标识（kebab-case，领域内唯一，不得使用保留字）。 */
   name: string
   /** 相对资产根目录的路径前缀，必须以 `/` 结尾，且不含 `..` / `.git` / 反斜杠。 */
   prefix: string
-  /** 可选的人类可读说明。 */
-  description?: string
+  /**
+   * 可选的类型级内容校验：落盘前调用；抛错即视为该 spec 非法（原样透传）。
+   *
+   * @param path 相对资产根目录的 posix 路径（已通过白名单校验）。
+   * @param content 待写入的文本内容。
+   */
+  validate?(path: string, content: string): void
 }
 
-/** 可进化 SKILL：内容由进化循环改写，初始内容作为种子落盘。 */
-export interface SeedSkill {
-  /** kebab-case 名称，领域内全局唯一。 */
-  name: string
-  /** 可选说明。 */
-  description?: string
-  /** SKILL.md 正文（种子内容）。 */
-  markdown: string
+/** 一次资产注册请求。 */
+export interface AssetSpec {
+  /** 资产类型（必须是 `assets.types[].name` 已声明的类型）。 */
+  type: string
+  /** 相对资产根目录的 posix 路径（必须落在该类型的 prefix 之下）。 */
+  path: string
+  /** 文件内容（UTF-8 文本）。 */
+  content: string
+  /**
+   * 写入模式；缺省 `seed`。
+   *   - `seed`：目标已存在则跳过（不覆盖）；
+   *   - `upsert`：内容与磁盘不同才覆盖；完全一致时同样跳过（no-op）。
+   */
+  mode?: 'seed' | 'upsert'
+  /** 可选提交说明（会写入本次 commit message）。 */
+  message?: string
+}
+
+/**
+ * 单个资产注册结果状态。
+ *
+ *   - `created` —— 新写入，且已产生 commit；
+ *   - `updated` —— 内容发生变化，且已产生 commit；
+ *   - `skipped` —— 未写盘、未 commit：`seed` 命中已存在文件，或 `upsert`
+ *     内容与磁盘完全一致。两者靠 {@link RegisterResult.reason} 区分。
+ */
+export type RegisterStatus = 'created' | 'skipped' | 'updated'
+
+/** 单个资产注册结果。 */
+export interface RegisterResult {
+  /** 相对资产根目录的 posix 路径。 */
+  path: string
+  /** 资产类型名。 */
+  type: string
+  /** 实际动作：新建 / 跳过 / 覆盖（语义见 {@link RegisterStatus}）。 */
+  status: RegisterStatus
+  /** 本次提交的 commit id（仅当该批次成功提交且该文件参与提交时存在）。 */
+  sha?: string
+  /** 是否因 git 不可用降级（资产已落盘，但未进入版本库）。 */
+  degraded?: boolean
+  /**
+   * 原因说明：
+   *   - `skipped` 时区分原因：`seed already exists` / `content unchanged`；
+   *   - `degraded: true` 时说明 git 降级原因。
+   */
+  reason?: string
+}
+
+/** 资产清单条目。 */
+export interface AssetEntry {
+  /** 相对资产根目录的 posix 路径。 */
+  path: string
+  /** 资产类型名。 */
+  type: string
+  /** 文件字节数。 */
+  size: number
+}
+
+/**
+ * 领域包在 `bootstrap` 中拿到的资产写入器。
+ *
+ * 三个方法都必须做路径白名单校验（`..`、绝对路径、`.git`、反斜杠一律拒绝）。
+ * `register` 是**同步**方法：一次调用内的全部 spec 要么全部落盘、要么一个都不写；
+ * 落盘后统一产生**一个** commit。
+ */
+export interface AssetWriter {
+  /** 注册一个或多个资产（同步；批量原子）。 */
+  register(spec: AssetSpec | readonly AssetSpec[]): RegisterResult[]
+  /** 列出命中已声明 prefix 的资产（按 path 排序）；可按类型过滤。 */
+  list(type?: string): AssetEntry[]
+  /** 读取资产文件内容；不存在时抛错。 */
+  read(path: string): string
 }
 
 /** 固有 SKILL：随领域包发布，不参与进化。 */
 export interface FirmwareSkill {
-  /** 名称，必须非空，且不得与可进化 SKILL 重名。 */
+  /** kebab-case 名称，不得自相重复，也不得占用 core 内置固件 SKILL 名。 */
   name: string
   /** 可选说明。 */
   description?: string
@@ -84,12 +154,16 @@ export interface SchedulerSpec {
   [key: string]: unknown
 }
 
-/** 领域 SKILL 集合。 */
-export interface DomainSkills {
-  /** 可进化 SKILL 列表。 */
-  evolvable: SeedSkill[]
-  /** 固有 SKILL 列表（不进化）；缺省视为空数组。 */
-  firmware?: FirmwareSkill[]
+/** 领域资产注册契约：类型声明 + 同步 bootstrap。 */
+export interface DomainAssets {
+  /** 资产类型列表（至少 1 项，name 唯一，prefix 两两不重叠）。 */
+  types: readonly AssetType[]
+  /**
+   * 领域包自己的资产注册入口：`install` 在工具注册之后、启用领域之前同步调用。
+   *
+   * **必须同步**：返回 thenable / Promise 会导致安装失败。
+   */
+  bootstrap?(assets: AssetWriter): void
 }
 
 /**
@@ -195,10 +269,10 @@ export interface DomainPack {
   persona: PersonaProvider
   /** 默认会话 id（非空，`^[a-zA-Z0-9._-]+$`，长度 ≤ 128）。 */
   defaultSessionId: string
-  /** 领域 SKILL 集合。 */
-  skills: DomainSkills
-  /** 资产类型列表。 */
-  assetTypes: AssetType[]
+  /** 资产注册契约（必填）。 */
+  assets: DomainAssets
+  /** 领域自带的固有 SKILL 列表（不参与进化）；缺省视为空数组。 */
+  firmwareSkills?: readonly FirmwareSkill[]
   /** 调度器契约。 */
   scheduler: SchedulerSpec
   /** 进化策略。 */
