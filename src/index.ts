@@ -229,9 +229,77 @@ export {
   type SkillFrontmatter,
 } from './evolution/skills.js'
 
+// ---- Persona 槽位（§8.1：单 section + 动态 text） ----
+export {
+  CORE_PERSONA_FALLBACK,
+  PERSONA_SECTION_NAME,
+  PERSONA_SECTION_ORDER,
+  createPersonaSlot,
+  loadCorePersonaMarkdown,
+  mountPersonaSlot,
+  registerPersonaSection,
+  type PersonaSlot,
+  type PersonaSource,
+  type PersonaSwitchLogger,
+  type PromptSectionLike,
+  type SystemPromptLike,
+} from './prompts/persona.js'
+
+// ---- 会话 ensure（§8.3：reuse / resume / create） ----
+export {
+  ensureSession,
+  type EnsureAgent,
+  type EnsureAgentHandle,
+  type EnsureAgentOptions,
+  type EnsureAgentsLike,
+  type EnsureCreateOptions,
+  type EnsureOutcome,
+  type EnsureResumeOptions,
+  type EnsureSessionDeps,
+  type EnsureSessionPersistenceLike,
+  type EnsureSessionResult,
+} from './session-ensure.js'
+
+// ---- 开场 notice（§8.4：blank → 一次性投递） ----
+export {
+  CORE_OPENING_NOTICE_SUMMARY,
+  CORE_OPENING_NOTICE_TEXT,
+  buildOpeningNoticeMessage,
+  deliverOpeningNotice,
+  isSessionBlank,
+  type BlankCheckDeps,
+  type OpeningNoticeAgent,
+  type OpeningNoticeAgents,
+  type OpeningNoticeDeps,
+  type OpeningNoticeResult,
+  type SessionEventLike,
+  type SessionHandleLike,
+  type SessionProjectionsLike,
+} from './opening-notice.js'
+
+// ---- 生产者消息源（V4 producer-owned kind） ----
+export {
+  PRODUCER_KIND,
+  createNoticeMessage,
+  type NoticeMessageSource,
+  type NoticeUserMessage,
+} from './message-source.js'
+
+// ---- 启动宽限（§4.1 / §20 第 1、5 条） ----
+export {
+  runGenericStartup,
+  startStartupSequence,
+  type GenericStartupResult,
+  type StartupController,
+  type StartupDeps,
+  type StartupServices,
+  type StartupSessionPersistence,
+} from './startup.js'
+
 // ---- 校验 ----
 export {
   DomainPackValidationError,
+  OPENING_NOTICE_MAX_BYTES,
   PERSONA_MAX_BYTES,
   RESERVED_ASSET_TYPE_NAMES,
   runAssetsBootstrap,

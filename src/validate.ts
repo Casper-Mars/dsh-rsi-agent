@@ -30,6 +30,9 @@ import { SESSION_ID_MAX_LENGTH, SESSION_ID_PATTERN } from './runtime.js'
 /** 人设 Markdown 的字节上限（64 KB）。 */
 export const PERSONA_MAX_BYTES = 64 * 1024
 
+/** 领域开场 notice 文案的字节上限（4 KB）。 */
+export const OPENING_NOTICE_MAX_BYTES = 4 * 1024
+
 /**
  * 保留的资产类型名（技术方案 §6「资产类型保留字」）。
  *
@@ -203,6 +206,35 @@ function validatePersona(input: Record<string, unknown>): string {
   }
 
   return markdown
+}
+
+/**
+ * 校验可选的领域开场 notice。
+ *
+ * 规则：出现该键（且不为 `undefined`）时必须是**非空**字符串、合法 UTF-8、
+ * UTF-8 字节数 ≤ {@link OPENING_NOTICE_MAX_BYTES}。缺省返回 `undefined`。
+ */
+function validateOpeningNotice(input: Record<string, unknown>): string | undefined {
+  if (!Object.hasOwn(input, 'openingNotice') || input.openingNotice === undefined) {
+    return undefined
+  }
+
+  const value = input.openingNotice
+  if (typeof value !== 'string' || value.trim() === '') {
+    fail('openingNotice', `必须是非空字符串，实际为 ${describe(value)}`)
+  }
+  // 孤立代理项在 UTF-8 编解码往返后会被替换为 U+FFFD，据此判定非法 UTF-8。
+  if (Buffer.from(value, 'utf8').toString('utf8') !== value) {
+    fail('openingNotice', '必须是合法 UTF-8 字符串（含孤立代理项）')
+  }
+  const bytes = Buffer.byteLength(value, 'utf8')
+  if (bytes > OPENING_NOTICE_MAX_BYTES) {
+    fail(
+      'openingNotice',
+      `UTF-8 字节数必须 ≤ ${OPENING_NOTICE_MAX_BYTES}（4 KB），实际为 ${bytes}`,
+    )
+  }
+  return value
 }
 
 function validateFirmwareSkills(input: Record<string, unknown>): void {
@@ -563,6 +595,7 @@ export function validateDomainPack(input: unknown, core: CoreSurface = {}): Vali
   validateNoLegacySkills(record)
 
   const personaMarkdown = validatePersona(record)
+  validateOpeningNotice(record)
   validateAssets(record)
   validateFirmwareSkills(record)
   validateScheduler(record)

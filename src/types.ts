@@ -267,6 +267,13 @@ export interface DomainPack {
   displayName?: string
   /** 人设提供者。 */
   persona: PersonaProvider
+  /**
+   * 可选：领域专属开场 notice 文案（投递给首次启动的 blank 会话）。
+   *
+   * 非空、合法 UTF-8、≤ 4096 字节；缺省时使用 core 的通用开场文案。
+   * 该字段只影响开场白内容，不改变会话 / 人设 / 工具契约。
+   */
+  openingNotice?: string
   /** 默认会话 id（非空，`^[a-zA-Z0-9._-]+$`，长度 ≤ 128）。 */
   defaultSessionId: string
   /** 资产注册契约（必填）。 */

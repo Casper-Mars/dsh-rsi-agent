@@ -1,8 +1,9 @@
 /**
  * 资源搬运脚本：把 `tsc` 不会产出的资源带进 `dist-server/`。
  *
- * 1. `src/**` 下的 Markdown 资源（SKILL 指南 / 人设 prompt）按原相对路径复制，
- *    使编译态下 `new URL('./x.md', import.meta.url)` 依然可解析；
+ * 1. `src/**` 下的 Markdown 资源（SKILL 指南 / 人设 prompt，含
+ *    `src/prompts/persona.md`）按原相对路径复制，使编译态下
+ *    `new URL('./x.md', import.meta.url)` 依然可解析；
  * 2. 仓库根的 `skills/`（随包发布的固件 SKILL）整体复制到 `dist-server/skills/`，
  *    使运行时在发布形态下也能读到固件 SKILL 原文；
  * 3. 仓库根的 `cordis.patch.yml` 复制到 `dist-server/cordis.patch.yml`，

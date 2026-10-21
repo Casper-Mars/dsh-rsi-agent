@@ -27,7 +27,10 @@ export function apply(ctx: Context, config: Partial<RsiAgentConfig> = {}): void 
   // 范围校验）统一在 `createDomainRuntime` 内完成，避免两处默认值打架。
   const resolved = resolveConfig(config)
 
-  // `agentHost` 是 core 自身提供的服务（不是外部依赖），故不进顶层 `inject`；
-  // 以 class plugin 装载，实例随本插件 fiber 卸载自动注销。
-  ctx.plugin(AgentHost, { config: resolved })
+  // `agentHost` 是 core 自身提供的服务（不是外部依赖），故不进顶层 `inject`。
+  // 直接在当前插件 ctx 内构造：服务随本插件 fiber 卸载自动注销（与
+  // `ctx.plugin(AgentHost)` 同一归属语义），同时拿到实例以触发启动序列。
+  const host = new AgentHost(ctx, { config: resolved })
+  // §4.1 启动序列：注册 persona section 已在构造函数内完成；这里起启动宽限。
+  host.start()
 }

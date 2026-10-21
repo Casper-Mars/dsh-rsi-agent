@@ -25,8 +25,25 @@ import {
 } from './evolution/policy.js'
 import { createFirmwareSkillGuard } from './evolution/firmware-guard.js'
 import { registerFirmwareSkills } from './evolution/skills.js'
+import { readService, serviceOf } from './context.js'
+import {
+  CORE_OPENING_NOTICE_SUMMARY,
+  CORE_OPENING_NOTICE_TEXT,
+  deliverOpeningNotice,
+  type OpeningNoticeAgents,
+  type OpeningNoticeDeps,
+  type SessionProjectionsLike,
+} from './opening-notice.js'
+import { createPersonaSlot, mountPersonaSlot, type PersonaSlot } from './prompts/persona.js'
 import { createDomainLogger, createDomainRuntime } from './runtime.js'
+import {
+  ensureSession,
+  type EnsureAgentHandle,
+  type EnsureAgentsLike,
+  type EnsureSessionPersistenceLike,
+} from './session-ensure.js'
 import { hasSkillAssetType, mountSkillFilesystemProvider } from './skills/provider.js'
+import { startStartupSequence, type StartupController, type StartupServices } from './startup.js'
 import {
   DOMAIN_API_VERSION,
   type ActiveDomain,
@@ -188,29 +205,16 @@ export {
   type SessionIdSources,
 } from './runtime.js'
 
+/** 会话持久化服务：ensure 需要 `stat`，notice 判读需要 `open`（可选）。 */
+type SessionPersistenceService = EnsureSessionPersistenceLike &
+  Partial<Pick<OpeningNoticeDeps['sessionPersistence'], 'open'>>
+
 /** `ctx.tools` 的最小结构：只依赖 dsh-tools 的公开方法，不引入运行时依赖。 */
 interface ToolRegistryLike {
   /** 注册一个工具，返回它的 unregister 函数（dsh-tools 契约）。 */
   register(definition: ToolDefinition): () => void
   /** 查当前可见工具；用于注册前的重名预检。 */
   get?(name: string): unknown
-}
-
-function readService(ctx: Context, name: string): unknown {
-  const getter = (ctx as unknown as { get?: (serviceName: string) => unknown }).get
-  if (typeof getter === 'function') {
-    try {
-      const value = getter.call(ctx, name)
-      if (value !== undefined) return value
-    } catch {
-      // 落到属性读取
-    }
-  }
-  try {
-    return (ctx as unknown as Record<string, unknown>)[name]
-  } catch {
-    return undefined
-  }
 }
 
 function safeId(pack: unknown): string {
@@ -239,6 +243,16 @@ export class AgentHost extends Service<never> implements AgentHostService {
   private current: ActiveDomain | undefined
   /** 最近一次 install 的 provider 就绪信号；未挂载时为已 resolve。 */
   private providerReady: Promise<void> = Promise.resolve()
+  /** persona 单槽位：全程只注册一个 section，领域装/卸只切内部文案。 */
+  private readonly persona: PersonaSlot
+  /** 启动宽限控制器；`start()` 只允许创建一次。 */
+  private startupController: StartupController | undefined
+  /**
+   * 正在同步装配的 install 计数（`> 0` 表示装配中）。
+   *
+   * 供启动计时器判断是否顺延：install 结果出来之前不投通用开场。
+   */
+  private installingDepth = 0
 
   constructor(ctx: Context, config: AgentHostConfig = {}) {
     super(ctx, 'agentHost')
@@ -246,6 +260,17 @@ export class AgentHost extends Service<never> implements AgentHostService {
     this.nativeLogger = readService(ctx, 'logger')
     this.logger = createDomainLogger(this.nativeLogger, 'agentHost')
     this.env = config.env
+
+    // 通用人设槽位：core 启动即注册唯一 section；内容随领域 install 切换。
+    this.persona = createPersonaSlot({
+      logger: {
+        info: (message, meta) => this.logger.info(message, meta),
+        warn: (message, meta) => this.logger.warn(message, meta),
+      },
+    })
+    mountPersonaSlot(this.ctx, this.persona, {
+      warn: (message, meta) => this.logger.warn(message, meta),
+    })
   }
 
   /** 当前激活领域；只读访问器，外部无法赋值。 */
@@ -270,8 +295,21 @@ export class AgentHost extends Service<never> implements AgentHostService {
    * 同步安装领域包。
    *
    * 契约类错误直接抛出（插件加载失败），基础设施类错误 `warn` 后继续。
+   *
+   * 装配全程递增 {@link installingDepth}：启动计时器到期时若仍在装配，会
+   * 顺延而不是抢跑投递通用开场。
    */
   install(pack: DomainPack, options: InstallOptions = {}): Disposable<void> {
+    this.installingDepth += 1
+    try {
+      return this.installDomain(pack, options)
+    } finally {
+      this.installingDepth -= 1
+    }
+  }
+
+  /** {@link install} 的装配主体（由计数包装器调用）。 */
+  private installDomain(pack: DomainPack, options: InstallOptions = {}): Disposable<void> {
     const current = this.current
     if (current) {
       throw new Error(
@@ -404,13 +442,27 @@ export class AgentHost extends Service<never> implements AgentHostService {
         })
       }
 
+      // 人设切换（§8.1 / §8.2）：只改单 section 的动态 text，**不重建会话**。
+      // 放在所有装配动作之后：任何一步失败都不会留下「半个领域人设」。
+      this.persona.useDomain(validated.personaMarkdown, identity.id)
+      registry.add('persona', 'restore core persona', () => {
+        this.persona.restore(identity.id)
+      })
+
       this.current = active
-      // 后续任务把 scheduler / persona / firmwareSkills / skillProvider 的 teardown
+      // 领域已成功落地 → 取消启动宽限，本轮只由领域路径投递开场。
+      // 位置必须在所有校验 / 装配动作之后：install 失败不得消耗宽限，
+      // 否则无重试时默认会话将一直 blank（D1）。
+      this.cancelStartup(`install domain ${identity.id}`)
+      // 后续任务把 scheduler / firmwareSkills / skillProvider 的 teardown
       // 加到对应阶段即可，无需改动 dispose 逻辑。
       registry.add('active', 'clear active domain', () => {
         if (this.current === active) this.current = undefined
         this.providerReady = Promise.resolve()
       })
+
+      // 会话 ensure + 开场 notice（§8.3 / §8.4）：异步执行、失败只 warn 不抛。
+      this.startDomainSession(active, identity.pack, logger, registry)
     } catch (error) {
       // 不出现「表面成功」：安装失败必须留下 error 日志（含 bootstrap 中途失败）。
       logger.error(
@@ -423,6 +475,200 @@ export class AgentHost extends Service<never> implements AgentHostService {
     }
 
     return disposable
+  }
+
+  /**
+   * 启动核心序列（由 `plugin.apply` 在 core 启动时调用一次）。
+   *
+   * 行为：
+   *   - 以 `startupGraceMs` 起计时器（`ctx.effect` 托管，插件卸载自动清理）；
+   *   - 计时器到期且期间没有领域 install → 通用路径 ensure + 通用开场；
+   *   - 宽限期内 `install` **成功**后才调用 {@link cancelStartup}（装配失败不消耗
+   *     宽限）；install 装配期间计时器到期会顺延 50ms；
+   *   - `startupGraceMs === 0` → 立即执行通用路径（同步/微任务内可见）。
+   *
+   * 幂等：重复调用只保留第一次的控制器。
+   */
+  start(): StartupController | undefined {
+    if (this.startupController) return this.startupController
+
+    let runtime
+    try {
+      runtime = createDomainRuntime(undefined, {
+        config: this.config.config,
+        logger: this.logger,
+        nativeLogger: this.nativeLogger,
+        env: this.env,
+      })
+    } catch (error) {
+      this.logger.error('[rsi-agent/startup] 通用运行时创建失败，跳过启动序列', error)
+      return undefined
+    }
+
+    const controller = startStartupSequence({
+      graceMs: runtime.config.startupGraceMs,
+      sessionId: runtime.sessionId,
+      workspaceDir: runtime.workspaceDir,
+      resolveServices: () => this.startupServices(),
+      isInstalling: () => this.installingDepth > 0,
+      logger: this.logger,
+      noticeText: CORE_OPENING_NOTICE_TEXT,
+      noticeSummary: CORE_OPENING_NOTICE_SUMMARY,
+      onSessionHandle: (handle) => this.bindSessionHandle(handle),
+    })
+
+    // 计时器由插件 fiber 托管：插件卸载时取消，绝不会在失活上下文里投递。
+    try {
+      this.ctx.effect(() => () => controller.cancel('plugin unload'), 'rsi-agent startup grace')
+    } catch (error) {
+      this.logger.warn('[rsi-agent/startup] 启动计时器 effect 绑定失败（降级）', error)
+    }
+
+    this.startupController = controller
+    return controller
+  }
+
+  /** 取消启动宽限（领域 install / 插件卸载）。 */
+  private cancelStartup(reason: string): void {
+    this.startupController?.cancel(reason)
+  }
+
+  /** 读取启动期所需的会话服务（缺失即降级，由 startup 模块记录日志）。 */
+  private startupServices(): StartupServices {
+    return {
+      agents: serviceOf<EnsureAgentsLike>(this.ctx, 'agents'),
+      sessionPersistence: serviceOf<SessionPersistenceService>(this.ctx, 'sessionPersistence'),
+      sessionProjections: serviceOf<SessionProjectionsLike>(this.ctx, 'sessionProjections'),
+    }
+  }
+
+  /** 把启动路径拿到的会话 handle 绑定到插件 fiber（卸载自动拆除）。 */
+  private bindSessionHandle(handle: EnsureAgentHandle): void {
+    let disposed = false
+    const dispose = (): void => {
+      if (disposed) return
+      disposed = true
+      void handle.dispose().catch(() => {})
+    }
+    try {
+      this.ctx.effect(() => dispose, 'rsi-agent startup session')
+    } catch (error) {
+      this.logger.warn('[rsi-agent/startup] 会话 handle 绑定失败，立即拆除（降级）', error)
+      dispose()
+    }
+  }
+
+  /**
+   * 领域安装后的会话 ensure + 开场 notice（异步、绝不抛）。
+   *
+   * - ensure 三分支由 {@link ensureSession} 负责；
+   * - handle 同时绑定 `ctx.effect`（插件 fiber 卸载）与领域 teardown（uninstall）；
+   * - 投递文案优先级：`pack.openingNotice` > 通用文案；
+   * - 任一服务缺失 / 调用失败只 `warn`，不影响 install 成功。
+   */
+  private startDomainSession(
+    active: ActiveDomain,
+    pack: DomainPack,
+    logger: DomainLogger,
+    registry: TeardownRegistry,
+  ): void {
+    const agents = serviceOf<EnsureAgentsLike>(this.ctx, 'agents')
+    const persistence = serviceOf<SessionPersistenceService>(this.ctx, 'sessionPersistence')
+
+    if (!agents || typeof agents.get !== 'function') {
+      logger.warn('agents 服务不可用，跳过领域会话 ensure / 开场 notice（降级）')
+      return
+    }
+    if (!persistence || typeof persistence.stat !== 'function') {
+      logger.warn('sessionPersistence 服务不可用，跳过领域会话 ensure / 开场 notice（降级）')
+      return
+    }
+
+    let cancelled = false
+    let handleDispose: (() => void) | undefined
+    const disposeHandle = (): void => {
+      const run = handleDispose
+      handleDispose = undefined
+      run?.()
+    }
+
+    // 领域卸载 / 插件卸载都尽早拆除会话；两处调用同一个幂等闭包。
+    let effectDispose: (() => void) | undefined
+    try {
+      const effect = this.ctx.effect(
+        () => () => {
+          cancelled = true
+          disposeHandle()
+        },
+        'rsi-agent domain session',
+      )
+      effectDispose = () => {
+        void effect()
+      }
+      registry.add('active', 'dispose domain session effect', () => {
+        effectDispose?.()
+      })
+    } catch (error) {
+      logger.warn('会话 effect 绑定失败（降级：仅随 ensure 结果拆除）', error)
+    }
+
+    const sessionId = active.sessionId
+    const workspaceDir = active.runtime.workspaceDir
+
+    void ensureSession({
+      agents,
+      sessionPersistence: persistence,
+      sessionId,
+      workspaceDir,
+      logger: (message) => logger.info(message),
+    })
+      .then(async ({ outcome, handle }) => {
+        // 卸载（effect 已触发）或领域已切换 → 立即拆除刚建好的会话。
+        if (cancelled || this.current !== active) {
+          if (handle) await handle.dispose().catch(() => {})
+          return
+        }
+
+        if (handle) {
+          let done = false
+          handleDispose = () => {
+            if (done) return
+            done = true
+            void handle.dispose().catch(() => {})
+          }
+          // handle 已就绪但 effect 绑定失败过：登记到 active 阶段兜底拆除。
+          if (!effectDispose) {
+            registry.add('active', 'dispose domain session handle', disposeHandle)
+          }
+        }
+
+        if (outcome.kind === 'skipped') {
+          logger.warn(`领域 "${pack.id}" 会话 ensure 跳过：${outcome.detail}`)
+          return
+        }
+
+        const text = pack.openingNotice ?? CORE_OPENING_NOTICE_TEXT
+        const summary = pack.openingNotice === undefined ? CORE_OPENING_NOTICE_SUMMARY : undefined
+        const projections = serviceOf<SessionProjectionsLike>(
+          this.ctx,
+          'sessionProjections',
+        )
+
+        await deliverOpeningNotice({
+          agents: agents as unknown as OpeningNoticeAgents,
+          sessionPersistence: persistence as OpeningNoticeDeps['sessionPersistence'],
+          ...(projections === undefined ? {} : { sessionProjections: projections }),
+          sessionId,
+          text,
+          ...(summary === undefined ? {} : { summary }),
+          // 领域路径同样探测卸载 / 切换：投递链路内（blank 判读后）再查一次。
+          isCancelled: () => cancelled || this.current !== active,
+          logger: (message) => logger.info(message),
+        })
+      })
+      .catch((error: unknown) => {
+        logger.warn(`领域 "${pack.id}" 会话 ensure / 开场 notice 异常（已隔离）`, error)
+      })
   }
 
   /**
