@@ -261,17 +261,33 @@ function isValidTimezone(timezone: string): boolean {
   }
 }
 
+/** {@link resolveTimezone} 的优先级选项。 */
+export interface ResolveTimezoneOptions {
+  /**
+   * 谁优先：`config`（缺省，`CoreConfig.timezone` 优先）或 `pack`
+   * （领域包 `scheduler.timezone` 优先）。
+   *
+   * 调度器按技术方案 §7 使用 `pack`：领域声明了时区就以领域为准，运维配置
+   * 只作为领域未声明时的兜底；安装期（runtime）仍沿用 `config` 优先，保证
+   * 既有语义与测试不变。
+   */
+  readonly prefer?: 'config' | 'pack'
+}
+
 /**
- * 解析运行时区：`config.timezone` > 领域包 `scheduler.timezone` > 系统时区。
+ * 解析运行时区：缺省 `config.timezone` > 领域包 `scheduler.timezone` > 系统时区；
+ * `options.prefer === 'pack'` 时反转为 `pack > config > 系统`。
  *
  * 非法 IANA 名称直接抛 `RangeError`（和 `DomainPack` 校验的契约类错误一致）。
  */
 export function resolveTimezone(
   config: Pick<CoreConfig, 'timezone'> = {},
   pack?: { readonly scheduler?: { readonly timezone?: string } } | undefined,
+  options: ResolveTimezoneOptions = {},
 ): string {
-  const configured = config.timezone
-  if (typeof configured === 'string' && configured.trim() !== '') {
+  const fromConfig = (): string | undefined => {
+    const configured = config.timezone
+    if (typeof configured !== 'string' || configured.trim() === '') return undefined
     const timezone = configured.trim()
     if (!isValidTimezone(timezone)) {
       throw new RangeError(`[runtime] 时区非法：不是合法的 IANA 时区 ${JSON.stringify(timezone)}`)
@@ -281,12 +297,20 @@ export function resolveTimezone(
 
   // 领域包的时区由 `validateDomainPack` 负责裁决（契约类错误必须由校验层抛出，
   // 否则错误类型会从 DomainPackValidationError 退化成 RangeError）；此处只取值。
-  const declared = pack?.scheduler?.timezone
-  if (typeof declared === 'string' && declared.trim() !== '') {
+  const fromPack = (): string | undefined => {
+    const declared = pack?.scheduler?.timezone
+    if (typeof declared !== 'string' || declared.trim() === '') return undefined
     return declared.trim()
   }
 
-  return resolveSystemTimezone()
+  // 显式给出的 CoreConfig 时区即使是「被领域包覆盖」的一方也必须先校验：
+  // 静默忽略一个非法配置会让运维错误永久隐身。
+  const configValue = fromConfig()
+  const packValue = fromPack()
+  if (options.prefer === 'pack') {
+    return packValue ?? configValue ?? resolveSystemTimezone()
+  }
+  return configValue ?? packValue ?? resolveSystemTimezone()
 }
 
 /** 创建运行时所需的最小领域包形状（core 自身可为 `undefined`）。 */

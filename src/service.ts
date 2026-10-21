@@ -35,6 +35,8 @@ import {
   type SessionProjectionsLike,
 } from './opening-notice.js'
 import { createPersonaSlot, mountPersonaSlot, type PersonaSlot } from './prompts/persona.js'
+import { createAgentWakeSink, createSchedulerService, type SchedulerService } from './scheduler/index.js'
+import type { WakeAgentsLike } from './scheduler/service.js'
 import { createDomainLogger, createDomainRuntime } from './runtime.js'
 import {
   ensureSession,
@@ -50,6 +52,7 @@ import {
   type AgentHostService,
   type DomainLogger,
   type DomainPack,
+  type DomainRuntime,
   type InstallOptions,
   type ToolDefinition,
 } from './types.js'
@@ -449,6 +452,12 @@ export class AgentHost extends Service<never> implements AgentHostService {
         this.persona.restore(identity.id)
       })
 
+      // 调度器装配（§12）：任务定义目录缺省 `<assetsDir>/tasks`；时区优先级
+      // `pack.scheduler.timezone > CoreConfig.timezone > 系统`。装配失败只 warn
+      // （定时能力降级，不影响领域安装）。start 放在 active 落地之后，避免任务
+      // 在「安装尚未成功」的窗口里被触发。
+      const scheduler = this.mountScheduler(identity.pack, runtime, logger, registry)
+
       this.current = active
       // 领域已成功落地 → 取消启动宽限，本轮只由领域路径投递开场。
       // 位置必须在所有校验 / 装配动作之后：install 失败不得消耗宽限，
@@ -460,6 +469,8 @@ export class AgentHost extends Service<never> implements AgentHostService {
         if (this.current === active) this.current = undefined
         this.providerReady = Promise.resolve()
       })
+
+      scheduler?.start()
 
       // 会话 ensure + 开场 notice（§8.3 / §8.4）：异步执行、失败只 warn 不抛。
       this.startDomainSession(active, identity.pack, logger, registry)
@@ -669,6 +680,68 @@ export class AgentHost extends Service<never> implements AgentHostService {
       .catch((error: unknown) => {
         logger.warn(`领域 "${pack.id}" 会话 ensure / 开场 notice 异常（已隔离）`, error)
       })
+  }
+
+  /**
+   * 装配调度器（§12）。
+   *
+   * - 唤醒投递复用 `agents` 服务的固定会话 `followup` + producer-owned notice 消息源；
+   *   `agents` 缺失时注入「永远失败」的 sink，让唤醒降级为 `skipped` 而非崩溃；
+   * - teardown 压入 `'scheduler'` 阶段（拆卸顺序第一位：先停调度，再拆工具/会话）；
+   * - `ctx.effect` 兜底：插件 fiber 卸载时同样 stop，避免残留 timer；
+   * - 任何异常只 warn（定时能力降级），绝不阻断领域安装。
+   */
+  private mountScheduler(
+    pack: DomainPack,
+    runtime: DomainRuntime,
+    logger: DomainLogger,
+    registry: TeardownRegistry,
+  ): SchedulerService | undefined {
+    try {
+      const agents = serviceOf<WakeAgentsLike>(this.ctx, 'agents')
+      const sink =
+        agents === undefined
+          ? undefined
+          : createAgentWakeSink({
+              agents,
+              logger: {
+                info: (message: string, meta?: unknown) => logger.info(message, meta),
+                warn: (message: string, meta?: unknown) => logger.warn(message, meta),
+              },
+            })
+
+      const service = createSchedulerService({
+        runtime: {
+          home: runtime.home,
+          assetsDir: runtime.assetsDir,
+          dataDir: runtime.dataDir,
+          sessionId: runtime.sessionId,
+          timezone: runtime.timezone,
+          logger,
+        },
+        scheduler: pack.scheduler,
+        ...(pack.disclaimer === undefined ? {} : { disclaimer: pack.disclaimer }),
+        ...(this.config.config?.timezone === undefined
+          ? {}
+          : { configTimezone: this.config.config.timezone }),
+        ...(sink === undefined ? {} : { sink }),
+        logger,
+      })
+
+      registry.add('scheduler', 'stop scheduler', () => service.stop())
+      try {
+        const effect = this.ctx.effect(() => () => service.stop(), 'rsi-agent scheduler')
+        registry.add('scheduler', 'dispose scheduler effect', () => {
+          void effect()
+        })
+      } catch (error) {
+        logger.warn('调度器 effect 绑定失败（降级：仅随领域 teardown 停止）', error)
+      }
+      return service
+    } catch (error) {
+      logger.warn('调度器装配失败（降级：不启用定时任务）', error)
+      return undefined
+    }
   }
 
   /**

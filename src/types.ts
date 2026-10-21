@@ -146,10 +146,23 @@ export interface PersonaProvider {
   markdown(): string
 }
 
-/** 调度器契约（本任务只校验时区，不实现调度）。 */
+/**
+ * 调度器契约。
+ *
+ * 时区真源仍是 `timezone`；`runtimes` / `tasksDir` 为可选扩展（保持向后兼容）：
+ *   - `runtimes`：领域声明任务程序使用的运行时（v1 core 只支持 `node`）；
+ *     声明了 core 不认识的运行时，任务运行会以 `failed`（`failureKind='install'`）
+ *     结束，并在错误信息里点名该运行时。
+ *   - `tasksDir`：任务定义目录（相对 `<home>` 或绝对路径）。缺省
+ *     `<assetsDir>/tasks`（任务定义属于可版本化的资产，保存/删除走 `commitAssets`）。
+ */
 export interface SchedulerSpec {
   /** 合法 IANA 时区名（例如 `Asia/Shanghai`）。 */
   timezone: string
+  /** 任务程序运行时白名单（可选；v1 core 仅实现 `node`）。 */
+  runtimes?: readonly string[]
+  /** 任务定义目录（可选；相对路径基于 `<home>` 解析）。 */
+  tasksDir?: string
   /** 其余调度参数由后续任务解释。 */
   [key: string]: unknown
 }
@@ -274,6 +287,13 @@ export interface DomainPack {
    * 该字段只影响开场白内容，不改变会话 / 人设 / 工具契约。
    */
   openingNotice?: string
+  /**
+   * 可选：领域合规声明（唤醒正文末尾追加）。
+   *
+   * 非空、合法 UTF-8、≤ 1024 字节；缺省时不追加任何内容。该字段只影响唤醒
+   * 正文，不改变会话 / 人设 / 工具 / 调度契约。
+   */
+  disclaimer?: string
   /** 默认会话 id（非空，`^[a-zA-Z0-9._-]+$`，长度 ≤ 128）。 */
   defaultSessionId: string
   /** 资产注册契约（必填）。 */

@@ -33,6 +33,9 @@ export const PERSONA_MAX_BYTES = 64 * 1024
 /** 领域开场 notice 文案的字节上限（4 KB）。 */
 export const OPENING_NOTICE_MAX_BYTES = 4 * 1024
 
+/** 领域合规声明（唤醒正文末尾）的字节上限（1 KB）。 */
+export const DISCLAIMER_MAX_BYTES = 1024
+
 /**
  * 保留的资产类型名（技术方案 §6「资产类型保留字」）。
  *
@@ -237,6 +240,38 @@ function validateOpeningNotice(input: Record<string, unknown>): string | undefin
   return value
 }
 
+/**
+ * 校验可选的领域合规声明（`domainPack.disclaimer`）。
+ *
+ * 规则：出现该键（且不为 `undefined`）时必须是**非空**字符串、合法 UTF-8、
+ * UTF-8 字节数 ≤ {@link DISCLAIMER_MAX_BYTES}。缺省返回 `undefined`。
+ *
+ * 之所以与 `openingNotice` 分开校验：两者的用途与预算不同（开场白 4 KB、
+ * 唤醒尾巴 1 KB），错误信息必须点名各自的字段路径。
+ */
+function validateDisclaimer(input: Record<string, unknown>): string | undefined {
+  if (!Object.hasOwn(input, 'disclaimer') || input.disclaimer === undefined) {
+    return undefined
+  }
+
+  const value = input.disclaimer
+  if (typeof value !== 'string' || value.trim() === '') {
+    fail('disclaimer', `必须是非空字符串，实际为 ${describe(value)}`)
+  }
+  // 孤立代理项在 UTF-8 编解码往返后会被替换为 U+FFFD，据此判定非法 UTF-8。
+  if (Buffer.from(value, 'utf8').toString('utf8') !== value) {
+    fail('disclaimer', '必须是合法 UTF-8 字符串（含孤立代理项）')
+  }
+  const bytes = Buffer.byteLength(value, 'utf8')
+  if (bytes > DISCLAIMER_MAX_BYTES) {
+    fail(
+      'disclaimer',
+      `UTF-8 字节数必须 ≤ ${DISCLAIMER_MAX_BYTES}（1 KB），实际为 ${bytes}`,
+    )
+  }
+  return value
+}
+
 function validateFirmwareSkills(input: Record<string, unknown>): void {
   const firmwareSkills = input.firmwareSkills ?? []
   if (!Array.isArray(firmwareSkills)) {
@@ -427,6 +462,38 @@ function validateScheduler(input: Record<string, unknown>): void {
   } catch {
     fail('scheduler.timezone', `不是合法的 IANA 时区：${JSON.stringify(timezone)}`)
   }
+
+  // 可选扩展：`runtimes`（运行时白名单）与 `tasksDir`（任务定义目录）。
+  // 两者缺省合法；一旦出现就必须是「可用的声明」，避免调度器在运行期才发现。
+  if (scheduler.runtimes !== undefined) {
+    const runtimes = scheduler.runtimes
+    if (!Array.isArray(runtimes)) {
+      fail('scheduler.runtimes', `若提供必须是数组，实际为 ${describe(runtimes)}`)
+    }
+    const seen = new Set<string>()
+    runtimes.forEach((runtime: unknown, index: number) => {
+      const field = `scheduler.runtimes[${index}]`
+      if (typeof runtime !== 'string' || runtime.trim() === '') {
+        fail(field, `必须是非空字符串，实际为 ${describe(runtime)}`)
+      }
+      const name = runtime.trim()
+      if (name !== runtime) {
+        fail(field, `不得含首尾空白：${JSON.stringify(runtime)}`)
+      }
+      if (seen.has(name)) fail(field, `运行时 "${name}" 重复声明`)
+      seen.add(name)
+    })
+  }
+
+  if (scheduler.tasksDir !== undefined) {
+    const tasksDir = scheduler.tasksDir
+    if (typeof tasksDir !== 'string' || tasksDir.trim() === '') {
+      fail('scheduler.tasksDir', `若提供必须是非空字符串，实际为 ${describe(tasksDir)}`)
+    }
+    if (tasksDir.includes('\0')) {
+      fail('scheduler.tasksDir', '不得包含空字符')
+    }
+  }
 }
 
 function validateEvolutionPolicy(input: Record<string, unknown>): void {
@@ -596,6 +663,7 @@ export function validateDomainPack(input: unknown, core: CoreSurface = {}): Vali
 
   const personaMarkdown = validatePersona(record)
   validateOpeningNotice(record)
+  validateDisclaimer(record)
   validateAssets(record)
   validateFirmwareSkills(record)
   validateScheduler(record)
