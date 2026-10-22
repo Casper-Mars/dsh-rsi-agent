@@ -63,7 +63,7 @@
 首发形态是 **GitHub tag + 本地路径安装**，暂不发 npm。每次打 tag 前逐条过：
 
 1. `pnpm install --frozen-lockfile` —— 锁文件与 `package.json` 一致。
-2. `pnpm verify` —— `typecheck` / `check:domain-words` / `wiki:check` / `test` 全绿。
+2. `pnpm verify` —— `typecheck` / `check:peers` / `check:domain-words` / `wiki:check` / `test` 全绿。
 3. `pnpm build` —— 干净构建通过。
 4. `pnpm pack`，然后 `tar -tzf dsh-rsi-agent-<version>.tgz` 核对：
    - **必须含**：`cordis.patch.yml`、`dist-server/**`、`skills/`、`README.md`、`AGENTS.md`、`CHANGELOG.md`、`LICENSE`；

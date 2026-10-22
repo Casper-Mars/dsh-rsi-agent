@@ -106,7 +106,7 @@ home 根目录（`homeRoot`）按以下优先级解析（`src/runtime.ts` 的 `r
 ### 怎么回看旧 home 的资产
 
 - **直接看文件**：`ls ~/.dsh-rsi-agent/core/assets`。
-- **看提交历史**：`assets/` 的 git 仓在**领域装配后（install / 首次资产写入）**才初始化（`AgentHost.install` 调 `ensureAssetsRepo`），每个 home 各自独立；装过领域的 home 直接 `git -C ~/.dsh-rsi-agent/core/assets log --stat`。
+- **看提交历史**：`assets/` 的 git 仓在**领域装配时**（`AgentHost.install` 调 `ensureAssetsRepo`）初始化，每个 home 各自独立；装过领域的 home 直接 `git -C ~/.dsh-rsi-agent/core/assets log --stat`。
   core-only（没装领域）的 home 只会创建空 `assets/` 目录、**不会** `git init`，此时首次 `git log` 报 `fatal: not a git repository` 属预期，不是故障。
 - **用工具看**：`asset_history` 只查**当前 home** 的资产仓。要查旧 home，要么把 `DSH_RSI_HOME` 指回原来的 `homeRoot`（此时没有领域 → home 又是 `core`），要么直接用上面的 git 命令。
 
