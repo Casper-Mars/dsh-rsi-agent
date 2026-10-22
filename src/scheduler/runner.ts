@@ -15,6 +15,7 @@
  */
 import { spawn } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
+import { traceToEnv } from '../log/trace.js'
 import type { ExecInput, ExecResult, ExecStrategy, TaskScriptResult } from './types.js'
 
 /** 默认任务执行超时（60 秒）。 */
@@ -87,6 +88,9 @@ export function createNodeExecStrategy(options: NodeExecStrategyOptions = {}): E
           child = spawnFn(command, [...extraArgs, input.taskPath], {
             cwd: input.cwd,
             stdio: ['ignore', 'pipe', 'pipe'],
+            // 跨进程 trace：把当前链路的 traceId / taskId / sessionId 随 env 注入，
+            // 子进程内用 `traceFromEnv(process.env)` 即可接回同一链路。
+            env: { ...process.env, ...traceToEnv() },
           })
         } catch (error) {
           finish(null, error instanceof Error ? error.message : String(error))

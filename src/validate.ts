@@ -13,6 +13,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveCoreConfig } from './config.js'
+import { LOG_LEVELS, isLogLevel } from './log/level.js'
 import {
   checkPolicyIndependentCases,
   checkPolicyWindow,
@@ -270,6 +271,45 @@ function validateDisclaimer(input: Record<string, unknown>): string | undefined 
     )
   }
   return value
+}
+
+/**
+ * 校验可选的领域日志配置（`domainPack.logging`）。
+ *
+ * 宽松口径（技术方案 §13）：只校验**认识**的四个键的类型，未知键忽略；出现即要求
+ * 类型正确，错误信息点名字段路径（如 `logging.retentionDays`）。
+ */
+function validateLogging(input: Record<string, unknown>): void {
+  if (!Object.hasOwn(input, 'logging') || input.logging === undefined) return
+
+  const value = input.logging
+  if (!isRecord(value)) fail('logging', `必须是对象，实际为 ${describe(value)}`)
+
+  if (Object.hasOwn(value, 'level') && value.level !== undefined) {
+    if (!isLogLevel(value.level)) {
+      fail('logging.level', `允许 ${LOG_LEVELS.join(' | ')}，实际为 ${describe(value.level)}`)
+    }
+  }
+
+  if (Object.hasOwn(value, 'retentionDays') && value.retentionDays !== undefined) {
+    const days = value.retentionDays
+    if (typeof days !== 'number' || !Number.isFinite(days) || !Number.isInteger(days) || days < 1) {
+      fail('logging.retentionDays', `必须是 ≥ 1 的整数，实际为 ${describe(days)}`)
+    }
+  }
+
+  for (const key of ['secretKeys', 'amountKeys'] as const) {
+    if (!Object.hasOwn(value, key) || value[key] === undefined) continue
+    const list = value[key]
+    if (!Array.isArray(list)) {
+      fail(`logging.${key}`, `必须是字符串数组，实际为 ${describe(list)}`)
+    }
+    list.forEach((item: unknown, index: number) => {
+      if (typeof item !== 'string' || item.trim() === '') {
+        fail(`logging.${key}[${index}]`, `必须是非空字符串，实际为 ${describe(item)}`)
+      }
+    })
+  }
 }
 
 function validateFirmwareSkills(input: Record<string, unknown>): void {
@@ -664,6 +704,7 @@ export function validateDomainPack(input: unknown, core: CoreSurface = {}): Vali
   const personaMarkdown = validatePersona(record)
   validateOpeningNotice(record)
   validateDisclaimer(record)
+  validateLogging(record)
   validateAssets(record)
   validateFirmwareSkills(record)
   validateScheduler(record)

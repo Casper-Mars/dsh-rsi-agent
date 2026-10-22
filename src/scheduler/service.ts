@@ -15,6 +15,7 @@
  *   - 时区优先级：`pack.scheduler.timezone > CoreConfig.timezone > 系统`（§7）。
  */
 import { createNoticeMessage } from '../message-source.js'
+import { newTraceId, runWithTrace } from '../log/trace.js'
 import { resolveTimezone } from '../runtime.js'
 import type { DomainLogger, SchedulerSpec } from '../types.js'
 import type { Clock, TaskDef, TaskRunOutcome, Timer, TimerHandle, WakeSink } from './types.js'
@@ -299,26 +300,31 @@ export class SchedulerService {
 
   /** 单飞锁内的真实执行体。 */
   private executeTask(taskId: string): Promise<TaskRunOutcome> {
-    return runTask(taskId, {
-      store: this.store,
-      deps: this.deps,
-      exec: this.execStrategy,
-      waker: this.waker,
-      home: this.runtime.home,
-      ...(this.declaredRuntimes === undefined ? {} : { declaredRuntimes: this.declaredRuntimes }),
-      knownRuntimes: this.knownRuntimes,
-      timeoutMs: this.timeoutMs,
-      maxStdoutBytes: this.maxStdoutBytes,
-      maxStderrBytes: this.maxStderrBytes,
-      ...(this.logger === undefined
-        ? {}
-        : {
-            logger: {
-              info: (m: string, meta?: unknown) => this.logger?.info(m, meta),
-              warn: (m: string, meta?: unknown) => this.logger?.warn(m, meta),
-            },
-          }),
-    })
+    // 每次触发分配一个 traceId，并包住整条异步链（依赖安装 / 子进程 / 唤醒）：
+    // 同一链路内的所有日志自动带同一个 traceId；子进程由 runner 经 env 继承。
+    const trace = { traceId: newTraceId(), taskId, sessionId: this.runtime.sessionId }
+    return runWithTrace(trace, () =>
+      runTask(taskId, {
+        store: this.store,
+        deps: this.deps,
+        exec: this.execStrategy,
+        waker: this.waker,
+        home: this.runtime.home,
+        ...(this.declaredRuntimes === undefined ? {} : { declaredRuntimes: this.declaredRuntimes }),
+        knownRuntimes: this.knownRuntimes,
+        timeoutMs: this.timeoutMs,
+        maxStdoutBytes: this.maxStdoutBytes,
+        maxStderrBytes: this.maxStderrBytes,
+        ...(this.logger === undefined
+          ? {}
+          : {
+              logger: {
+                info: (m: string, meta?: unknown) => this.logger?.info(m, meta),
+                warn: (m: string, meta?: unknown) => this.logger?.warn(m, meta),
+              },
+            }),
+      }),
+    )
   }
 
   // -------------------------------------------------------------------------

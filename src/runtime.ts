@@ -34,9 +34,11 @@ import {
   type CommitPort,
   type CommitResult,
   type DomainLogger,
+  type DomainPackLogging,
   type DomainRuntime,
   type InstallOptions,
 } from './types.js'
+import { createLogging } from './log/index.js'
 
 /** 默认工作区根目录名（位于用户主目录下）。 */
 export const RSI_AGENT_HOME_NAME = '.dsh-rsi-agent'
@@ -319,6 +321,8 @@ export interface RuntimePack {
   readonly version: string
   readonly defaultSessionId?: string
   readonly scheduler?: { readonly timezone?: string }
+  /** 可选的领域日志配置（见 `DomainPack.logging`）。 */
+  readonly logging?: DomainPackLogging
 }
 
 /**
@@ -410,7 +414,25 @@ export function createDomainRuntime(
 
   const sessionId = resolveSessionId({ options: installOptions, config: resolved, pack })
   const timezone = resolveTimezone(resolved, pack)
-  const logger = ctx.logger ?? createDomainLogger(ctx.nativeLogger, `domain:${domainId}`)
+  // 日志门面：无论 `ctx.logger` 是否存在，都组合「原生转发 + JSONL 落盘」。
+  // 原生 logger 优先用调用方显式传入的 `ctx.logger`（已解析的 DomainLogger），
+  // 否则用 cordis 的 `nativeLogger`；两者都缺失时门面内部降级 console。
+  const logging = createLogging({
+    scope: 'rsi-agent',
+    logsDir,
+    native: ctx.logger ?? ctx.nativeLogger,
+    level: pack?.logging?.level ?? resolved.logLevel,
+    retentionDays: pack?.logging?.retentionDays ?? resolved.logRetentionDays,
+    maxBytes: resolved.logMaxSizeBytes,
+    ...(pack?.logging?.secretKeys === undefined
+      ? {}
+      : { secretKeys: pack.logging.secretKeys }),
+    ...(pack?.logging?.amountKeys === undefined
+      ? {}
+      : { amountKeys: pack.logging.amountKeys }),
+    env,
+  })
+  const logger: DomainLogger = logging.logger
   const commit = ctx.commit ?? createDefaultCommitPort({ env })
 
   // 最终 config 反映「生效值」：homeRoot / sessionId / timezone 均已定值，
@@ -443,53 +465,17 @@ export function createDomainRuntime(
 // 日志门面
 // ---------------------------------------------------------------------------
 
-/** 日志降级前的告警只输出一次。 */
-let warnedMissingLogger = false
-
 /**
- * 创建领域日志门面。
+ * 创建领域日志门面（向后兼容入口）。
  *
- * `ctx.logger` 缺失或形态非法时降级到 `console`（技术方案 §4.5：基础设施类
- * 错误 `warn` 后继续）。
+ * 内部委托 {@link createLogging}，但**不写文件**（`writeFile: false`），保持旧行为：
+ * 有原生 logger 就转发，没有就降级 console。`child()` 由新门面顺带提供。
+ *
+ * `level` 传 `debug`（最啰嗦）：原生 logger 自带级别策略，门面不替它二次过滤，
+ * 避免旧调用方的 `debug` 日志被默认阈值静默吞掉。
  */
 export function createDomainLogger(native: unknown, scope: string): DomainLogger {
-  const prefix = `[${scope}]`
-  const emit = (level: 'error' | 'warn' | 'info' | 'debug') => {
-    return (message: string, meta?: unknown): void => {
-      const method =
-        typeof native === 'object' || typeof native === 'function'
-          ? (native as Record<string, unknown>)[level]
-          : undefined
-      if (typeof method === 'function') {
-        const call = method as (message: string, ...rest: unknown[]) => void
-        if (meta === undefined) call.call(native, `${prefix} ${message}`)
-        else call.call(native, `${prefix} ${message}`, meta)
-        return
-      }
-      const fallback =
-        level === 'error'
-          ? console.error
-          : level === 'warn'
-            ? console.warn
-            : level === 'info'
-              ? console.info
-              : console.debug
-      if (meta === undefined) fallback(`${prefix} ${message}`)
-      else fallback(`${prefix} ${message}`, meta)
-    }
-  }
-
-  if (native === undefined && !warnedMissingLogger) {
-    warnedMissingLogger = true
-    console.warn(`${prefix} ctx.logger 缺失，日志降级到 console`)
-  }
-
-  return {
-    error: emit('error'),
-    warn: emit('warn'),
-    info: emit('info'),
-    debug: emit('debug'),
-  }
+  return createLogging({ scope, native, level: 'debug', writeFile: false }).logger
 }
 
 // ---------------------------------------------------------------------------

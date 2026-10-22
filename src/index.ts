@@ -36,6 +36,7 @@ export type {
   DomainAssets,
   DomainLogger,
   DomainPack,
+  DomainPackLogging,
   DomainRuntime,
   EvolutionPolicy,
   FirmwareSkill,
@@ -387,3 +388,68 @@ export {
   type DomainIdentity,
   type ValidatedDomainPack,
 } from './validate.js'
+
+// ---- 日志（§13：门面 / JSONL exporter / 脱敏 / trace / 保留策略） ----
+export {
+  DEFAULT_LOG_LEVEL,
+  LEVEL_RANK,
+  LOG_LEVELS,
+  LOG_LEVEL_ENV,
+  isLogLevel,
+  resolveLevel,
+  shouldEmit,
+} from './log/level.js'
+export {
+  TRACE_ENV,
+  currentTrace,
+  ensureTrace,
+  newTraceId,
+  runWithTrace,
+  traceFromEnv,
+  traceToEnv,
+  withTraceMeta,
+  type TraceContext,
+} from './log/trace.js'
+export {
+  BASE_SECRET_KEY_PATTERNS,
+  CIRCULAR_MARKER,
+  DEFAULT_AMOUNT_KEY_PATTERNS,
+  DEFAULT_MAX_ARRAY_LENGTH,
+  DEFAULT_MAX_DEPTH,
+  DEFAULT_MAX_STACK_LINES,
+  DEFAULT_MAX_TEXT_LENGTH,
+  MAX_DEPTH_MARKER,
+  REDACTED,
+  TRUNCATED_SUFFIX,
+  isAmountKey,
+  isSensitiveKey,
+  redactRecord,
+  redactText,
+  type RedactOptions,
+} from './log/redact.js'
+export {
+  DEFAULT_LOG_RETENTION_DAYS,
+  LOG_RETENTION_DAYS_ENV,
+  cleanupExpiredLogs,
+  isDatedLogFileName,
+  resolveRetentionDays,
+  type CleanupExpiredLogsOptions,
+  type CleanupExpiredLogsResult,
+} from './log/retention.js'
+export {
+  DEFAULT_LOG_MAX_BYTES,
+  DEFAULT_SINK_NAMESPACES,
+  LOG_MAX_BYTES_ENV,
+  LOG_MAX_SIZE_ENV,
+  createJsonlSink,
+  resolveMaxBytes,
+  type JsonlLogRecord,
+  type JsonlSink,
+  type JsonlSinkOptions,
+} from './log/exporter.js'
+export {
+  createLogging,
+  type CreateLoggingOptions,
+  type LoggingHandle,
+  type LoggingLogger,
+} from './log/index.js'

@@ -10,7 +10,7 @@
  */
 import type { Context, Disposable } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import type { ResolvedCoreConfig } from './config.js'
+import type { LogLevel, ResolvedCoreConfig } from './config.js'
 
 /** 当前 DomainPack 契约版本（`apiVersion` 必须严格等于该值）。 */
 export const DOMAIN_API_VERSION = 1
@@ -268,6 +268,23 @@ export interface DomainRuntime {
   readonly commit: CommitPort
 }
 
+/**
+ * 领域日志配置（可选，技术方案 §13）。
+ *
+ * 纯可选增量：不声明时全部走 core 默认（级别取 `CoreConfig.logLevel`、保留 30 天、
+ * 无领域扩展脱敏键）。声明时不递增 {@link DOMAIN_API_VERSION}——缺省即旧语义。
+ */
+export interface DomainPackLogging {
+  /** 级别阈值（`error` / `warn` / `info` / `debug`）；缺省取 `CoreConfig.logLevel`。 */
+  level?: LogLevel
+  /** 日志保留天数（正整数）。 */
+  retentionDays?: number
+  /** 追加的敏感键（子串匹配，与内置词表并集）。 */
+  secretKeys?: string[]
+  /** 追加的金额 / 成本键（子串匹配，与内置词表并集）。 */
+  amountKeys?: string[]
+}
+
 /** 领域包（DomainPack）：一个可安装领域的完整契约。 */
 export interface DomainPack {
   /** 契约版本，必须 === {@link DOMAIN_API_VERSION}。 */
@@ -304,6 +321,12 @@ export interface DomainPack {
   scheduler: SchedulerSpec
   /** 进化策略。 */
   evolutionPolicy: EvolutionPolicy
+  /**
+   * 可选：本领域的日志配置（级别 / 保留天数 / 扩展脱敏键）。
+   *
+   * 缺省时沿用 core 配置；出现时由 `validate.ts` 做类型校验（未知键忽略）。
+   */
+  logging?: DomainPackLogging
   /**
    * 工具工厂：返回本领域要注册的工具定义数组。
    *
@@ -385,6 +408,13 @@ export interface DomainLogger {
   warn(message: string, meta?: unknown): void
   info(message: string, meta?: unknown): void
   debug(message: string, meta?: unknown): void
+  /**
+   * 可选：派生带子 scope 的门面（如 `rsi-agent:scheduler`）。
+   *
+   * 声明为**可选方法**是为了不破坏既有实现者：只有 `src/log/index.ts` 的门面
+   * 提供它，任意自定义 logger 无需实现。
+   */
+  child?(scope: string): DomainLogger
 }
 
 declare module '@deepseek-ai/cordis' {
