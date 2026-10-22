@@ -32,6 +32,14 @@ export const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 /** 任务文件扩展名。 */
 export const TASK_FILE_EXT = '.json'
 
+/**
+ * 任务定义的写入动作（决定 commit message 里的动词）。
+ *
+ *   - `create` / `update` / `enable` / `disable` —— 工具层的四种写动作；
+ *   - `save` —— 缺省值，保持既有调用（`store.save(task)`）的提交语义不变。
+ */
+export type TaskSaveAction = 'create' | 'update' | 'enable' | 'disable' | 'save'
+
 /** 任务存储契约错误（id 非法 / 写入内容非法）。 */
 export class TaskStoreError extends Error {
   constructor(message: string) {
@@ -235,15 +243,21 @@ export class TaskStore {
     }
   }
 
-  /** 写入 / 覆盖任务（同步落盘，随后提交；提交失败只 warn）。 */
-  save(task: TaskDef): void {
+  /**
+   * 写入 / 覆盖任务（同步落盘，随后提交；提交失败只 warn）。
+   *
+   * @param task 已校验的任务定义。
+   * @param action 写入动作，决定 commit message 的动词
+   *   （`tasks: <action> <id>`）；缺省 `save`，与既有调用完全兼容。
+   */
+  save(task: TaskDef, action: TaskSaveAction = 'save'): void {
     if (!isTaskDef(task)) {
       throw new TaskStoreError(`save 的任务结构非法：${JSON.stringify(task)}`)
     }
     const path = this.filePath(task.id)
     mkdirSync(this.tasksDir, { recursive: true })
     writeFileSync(path, `${JSON.stringify(task, null, 2)}\n`, 'utf8')
-    this.commit(task.id, `tasks: save ${task.id}`)
+    this.commit(task.id, `tasks: ${action} ${task.id}`)
   }
 
   /** 删除任务文件；不存在返回 `false`（不抛错）。删除同样提交。 */

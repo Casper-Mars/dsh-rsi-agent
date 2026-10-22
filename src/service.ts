@@ -35,7 +35,12 @@ import {
   type SessionProjectionsLike,
 } from './opening-notice.js'
 import { createPersonaSlot, mountPersonaSlot, type PersonaSlot } from './prompts/persona.js'
-import { createAgentWakeSink, createSchedulerService, type SchedulerService } from './scheduler/index.js'
+import {
+  createAgentWakeSink,
+  createSchedulerService,
+  createSchedulerTools,
+  type SchedulerService,
+} from './scheduler/index.js'
 import type { WakeAgentsLike } from './scheduler/service.js'
 import { createDomainLogger, createDomainRuntime } from './runtime.js'
 import {
@@ -727,6 +732,24 @@ export class AgentHost extends Service<never> implements AgentHostService {
         ...(sink === undefined ? {} : { sink }),
         logger,
       })
+
+      // 任务定义工具（7 个 task_*）：注册必须在 `scheduler.start()` **之前**完成，
+      // 否则首轮 rebuild 之后新增的工具写入不会立刻反映到已装配的 timer 上。
+      // 写类工具只经 `TaskStore` 落盘 + commit，reload 通过注入回调解耦。
+      this.registerCoreTools(
+        createSchedulerTools({
+          store: service.store,
+          // 校验基准是 assetsDir；落盘基准必须是 runtime.home——执行链
+          // resolveTaskPath() 用 home 解析相对 task_path，两者不一致会让工具建
+          // 出来的任务 100% `failed / 任务程序不存在`（Task-11 P0）。
+          home: runtime.home,
+          assetsDir: runtime.assetsDir,
+          onChange: () => service.reload(),
+          ...(logger === undefined ? {} : { logger }),
+        }),
+        registry,
+        logger,
+      )
 
       registry.add('scheduler', 'stop scheduler', () => service.stop())
       try {

@@ -46,6 +46,7 @@ export {
   createTaskStore,
   isTaskDef,
   type TaskListResult,
+  type TaskSaveAction,
   type TaskStoreLogger,
   type TaskStoreOptions,
 } from './store.js'
@@ -102,6 +103,30 @@ export {
   runTask,
   type RunTaskDeps,
 } from './task.js'
+
+export {
+  SCHEDULER_TOOL_NAMES,
+  SCHEDULER_TOOLS_TAG,
+  SchedulerToolError,
+  TASK_PROGRAM_PREFIX,
+  TASK_PROGRAM_PREFIXES,
+  createSchedulerTools,
+  createTaskCreateTool,
+  createTaskDeleteTool,
+  createTaskDisableTool,
+  createTaskEnableTool,
+  createTaskGetTool,
+  createTaskListTool,
+  createTaskUpdateTool,
+  resolveHomeBase,
+  resolveTaskProgramPath,
+  toStoredTaskPath,
+  validateTaskCron,
+  validateTaskId,
+  type SchedulerToolStore,
+  type SchedulerToolsOptions,
+  type TaskView,
+} from './tools.js'
 
 export {
   SchedulerService,
