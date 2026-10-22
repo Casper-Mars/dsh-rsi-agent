@@ -24,6 +24,10 @@ jobs:
       - name: Install (frozen lockfile)
         run: pnpm install --frozen-lockfile
 
+      # pnpm 11 的 install 对 peer 不匹配只告警（exit 0），所以门槛必须显式跑。
+      - name: Peer dependency gate (peer 区间是唯一版本门槛)
+        run: pnpm check:peers
+
       - name: Typecheck
         run: pnpm typecheck
 
@@ -70,6 +74,10 @@ jobs:
           @deepseek-ai/dsh-skill@${{ matrix.dsh }}
           @deepseek-ai/dsh-skill-filesystem@${{ matrix.dsh }}
           @deepseek-ai/dsh-tools@${{ matrix.dsh }}
+
+      # 切换 dsh 版本后必须复查 peer：矩阵版本若与区间不一致，这里立刻红。
+      - name: Peer dependency gate
+        run: pnpm check:peers
 
       - name: Typecheck
         run: pnpm typecheck

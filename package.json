@@ -33,7 +33,10 @@
     "dist-server/**/*.md",
     "dist-server/cordis.patch.yml",
     "skills/",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "CHANGELOG.md",
+    "README.md",
+    "AGENTS.md"
   ],
   "dsh": {
     "bundle": {
@@ -52,7 +55,8 @@
     "prepublishOnly": "pnpm build",
     "check:domain-words": "node scripts/check-domain-words.mjs",
     "wiki:check": "node scripts/wiki-check.mjs",
-    "verify": "pnpm typecheck && pnpm check:domain-words && pnpm wiki:check && pnpm test"
+    "check:peers": "pnpm peers check",
+    "verify": "pnpm typecheck && pnpm check:peers && pnpm check:domain-words && pnpm wiki:check && pnpm test"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.5",

@@ -13,16 +13,21 @@
  *    **例外（构建产物）**：`dist/`、`dist-server/`、`node_modules/`、`coverage/`
  *    被 `.gitignore` 排除，干净 clone 里不存在是正常的，只校验命名合理性、
  *    不校验存在性（并在输出里列出被跳过的引用）。
- * 2. **废弃概念**：文档不得出现 `engines.dsh`（唯一白名单：同一行明确写了
- *    「已删除 / 已废弃 / 不得 / 禁止」的说明行）、`skills.evolvable`、`SeedSkill`。
+ * 2. **废弃概念**：文档不得出现 `engines.dsh`、`skills.evolvable`、`SeedSkill`。
+ *    白名单**按命中所在分句**判定：以 `。；;，,` 切句，只有该次命中所属分句里
+ *    明确写了「已删除 / 已废弃 / 不得 / 禁止 / 不使用」才放行；同一行其它分句
+ *    的免责词不得赦免本分句（防止「已启用 X，… 不得 …」这类同句洗白）。
  * 3. **脚本文件存在**：`package.json` 的 `scripts` 里 `node <path>` 引用的文件
  *    必须存在（防止改名后 CI 静默跳过）。
+ * 4. **文档必备内容**（Task-15）：README.md 的四个关键小节、CHANGELOG.md 的
+ *    首版本与双版本号、AGENTS.md 的两条边界必须真实出现。删掉即 exit 1，
+ *    防止「文档还在、契约被悄悄删了」。
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 const ROOT = process.cwd()
-const DOCS = ['README.md', 'M0-组合验证.md']
+const DOCS = ['README.md', 'AGENTS.md', 'CHANGELOG.md', 'M0-组合验证.md']
 const DOCS_DIR = join(ROOT, 'docs')
 
 /** 反引号中可识别为「仓库路径」的前缀。 */
@@ -45,6 +50,8 @@ function buildPrefixOf(candidate) {
 /** 根目录已知文件（反引号内出现即视为路径引用）。 */
 const ROOT_FILES = new Set([
   'README.md',
+  'AGENTS.md',
+  'CHANGELOG.md',
   'M0-组合验证.md',
   'package.json',
   'pnpm-lock.yaml',
@@ -58,14 +65,66 @@ const ROOT_FILES = new Set([
   '.gitignore',
 ])
 
-/** 废弃概念 → 白名单判定。 */
+/**
+ * 废弃概念 → 白名单判定。
+ *
+ * 免责词只对**命中位置所在分句**生效（见 {@link clauseAt}）：同一行里别处的
+ * 免责词不能为本分句背书。
+ */
 const DEPRECATED = [
+  { token: 'engines.dsh' },
+  { token: 'skills.evolvable' },
+  { token: 'SeedSkill' },
+]
+
+/** 分句边界（中英文标点对齐）。 */
+const CLAUSE_BOUNDARY = new Set(['。', '；', ';', '，', ','])
+
+/** 分句内的免责词。 */
+const DISCLAIMERS = /已删除|已废弃|不得|禁止|不使用/
+
+/**
+ * 取 `index` 所在分句（不跨行；`。；;，,` 为边界）。
+ *
+ * @returns 命中位置所属的分句文本。
+ */
+function clauseAt(line, index) {
+  let start = 0
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (CLAUSE_BOUNDARY.has(line[i])) {
+      start = i + 1
+      break
+    }
+  }
+  let end = line.length
+  for (let i = index; i < line.length; i += 1) {
+    if (CLAUSE_BOUNDARY.has(line[i])) {
+      end = i
+      break
+    }
+  }
+  return line.slice(start, end)
+}
+
+/**
+ * 文档必备内容（Task-15）。
+ *
+ * 只判「必须出现这些字样」，不约束顺序 / 措辞细节；目的是让「删掉版本契约 /
+ * 删掉 home 说明」这类退化在 CI 里立刻可见。
+ */
+const REQUIRED_CONTENT = [
   {
-    token: 'engines.dsh',
-    allowed: (line) => /已删除|已废弃|不得|禁止/.test(line),
+    file: 'README.md',
+    needles: ['home 切换与资产可见性', '不要用 allow-version 豁免', '版本契约', '首发形态'],
   },
-  { token: 'skills.evolvable', allowed: () => false },
-  { token: 'SeedSkill', allowed: () => false },
+  {
+    file: 'CHANGELOG.md',
+    needles: ['## [0.1.0]', '0.2.0-rc.2', '0.2.1-rc.2'],
+  },
+  {
+    file: 'AGENTS.md',
+    needles: ['领域', 'AssetWriter'],
+  },
 ]
 
 const problems = []
@@ -181,10 +240,19 @@ function checkDeprecated(file, content) {
   lines.forEach((line, index) => {
     for (const rule of DEPRECATED) {
       if (!line.includes(rule.token)) continue
-      if (rule.allowed(line)) continue
-      problems.push(
-        `${relFile}:${index + 1}: 出现废弃概念 "${rule.token}"：${line.trim()}`,
-      )
+      // 逐个命中单独判定：同一行出现多次、或命中分布在不同分句时，每处都必须
+      // 有自己的分句级免责词；任意一处未豁免即记账。
+      let offset = line.indexOf(rule.token)
+      while (offset !== -1) {
+        const clause = clauseAt(line, offset)
+        if (!DISCLAIMERS.test(clause)) {
+          problems.push(
+            `${relFile}:${index + 1}: 出现废弃概念 "${rule.token}"：${line.trim()}`,
+          )
+          break
+        }
+        offset = line.indexOf(rule.token, offset + rule.token.length)
+      }
     }
   })
 }
@@ -214,10 +282,35 @@ function checkScripts() {
   }
 }
 
+/** 校验文档必备内容：文件缺失或缺少任一 needle 都记账。 */
+function checkRequiredContent() {
+  for (const rule of REQUIRED_CONTENT) {
+    const full = join(ROOT, rule.file)
+    if (!existsSync(full)) {
+      problems.push(`${rule.file}: 必备文档不存在`)
+      continue
+    }
+    let content
+    try {
+      content = readFileSync(full, 'utf8')
+    } catch (error) {
+      problems.push(`${rule.file}: 无法读取（${error.message}）`)
+      continue
+    }
+    for (const needle of rule.needles) {
+      if (!content.includes(needle)) {
+        problems.push(`${rule.file}: 缺少必备内容 "${needle}"`)
+      }
+    }
+  }
+}
+
 function main() {
   const docs = collectDocs()
   if (docs.length === 0) {
-    problems.push('未找到任何文档（README.md / M0-组合验证.md / docs/**/*.md）')
+    problems.push(
+      '未找到任何文档（README.md / AGENTS.md / CHANGELOG.md / M0-组合验证.md / docs/**/*.md）',
+    )
   }
 
   /** 被跳过的构建产物引用（输出里说明，避免「静默不查」的错觉）。 */
@@ -237,6 +330,7 @@ function main() {
   }
 
   checkScripts()
+  checkRequiredContent()
 
   if (problems.length > 0) {
     console.error('[wiki-check] 发现问题：')
@@ -251,7 +345,11 @@ function main() {
     )
     for (const item of skipped) console.log(`  · ${item}`)
   }
-  console.log(`[wiki-check] OK：${docs.length} 个文档，链接 / 代码路径 / 废弃概念一致。`)
+  const needles = REQUIRED_CONTENT.reduce((sum, rule) => sum + rule.needles.length, 0)
+  console.log(
+    `[wiki-check] OK：${docs.length} 个文档，链接 / 代码路径 / 废弃概念一致；` +
+      `${REQUIRED_CONTENT.length} 份必备文档的 ${needles} 条必备内容齐全。`,
+  )
 }
 
 main()

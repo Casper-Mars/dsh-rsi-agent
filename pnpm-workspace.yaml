@@ -1,2 +1,7 @@
+# pnpm 11 起项目级配置只认本文件（.npmrc 同名项被忽略）。
+# autoInstallPeers 只补齐「缺失」的 peer，不会替换已安装但不满足区间的版本，
+# 因此不削弱 peer 门槛；真正的拦截命令是 `pnpm check:peers`（CI 必跑）。
+autoInstallPeers: true
+
 allowBuilds:
   esbuild: true
