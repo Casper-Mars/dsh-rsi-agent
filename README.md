@@ -41,6 +41,8 @@ dsh plugin --profile <p> add <domain-path>
 
 > 插件挂载顺序有意义：core 必须先于领域插件加载，否则领域的 `inject` 拿不到 `agentHost` 服务。
 
+> 人设语义：领域人设是**叠加**而非替换。`rsi-agent:persona` 的内容为「core 通用人设全文 + `\n\n---\n\n` + 领域人设全文」，core 始终作为基座排在最前；卸载领域后回到纯 core 通用人设。
+
 ### 本地开发形态
 
 ```sh

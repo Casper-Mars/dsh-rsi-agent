@@ -6,6 +6,8 @@
 
 ### Fixed
 
+- **领域人设改为叠加而非替换**：`useDomain()` 此前直接把 core 正文覆盖掉，导致装领域后 system prompt 只剩领域人设。现槽位内部分持 `coreText`（懒加载、只读一次）与 `domainText`，`text()` 返回「core + `\n\n---\n\n` + domain」；领域正文为空时不产生孤立分隔符；卸载后恢复纯 core。单 section 与「不重建会话」语义不变。
+
 - **peer 门槛恢复可执行**：删掉 `.npmrc` 里的 `strict-peer-dependencies=false`（该键在 pnpm 11 已不生效，留着只会误导）。实测 pnpm 11.7 的 `install` 对 peer 不匹配只告警、exit 0，故新增 `pnpm check:peers`（`pnpm peers check`）并接入 `verify` 与 CI 两个 job——peer 区间不满足时真红。
 - **wiki-check 废弃概念按分句判定**：免责词只对命中所在分句生效（以 `。；;，,` 切句），同句其它分句的「不得 / 已删除」不再赦免本分句。
 - **README 权限说法**：`homeRoot` / `home` 改为「以 `0o755` 创建，实际权限受 umask 影响；不 chmod 已存在的上层目录」。
@@ -25,7 +27,7 @@
 - **固件 SKILL**：`rsi-evolution`（正文含模板变量，注册前渲染）/ `skill-authorship` / `task-authorship`，随包发布、不参与进化。
 - **调度执行链**：cron 解析、依赖缓存、独立进程 runner、唤醒护栏与去重。
 - **任务定义工具**：`task_create` / `task_list` / `task_get` / `task_update` / `task_delete` / `task_enable` / `task_disable`；落盘走 `TaskStore`，与资产同仓提交。
-- **启动编排**：persona 槽位（core 唯一 section，随领域 install 切换）、固定会话 ensure、开场 notice 投递、启动宽限期（装配中顺延，失败不消耗宽限）。
+- **启动编排**：persona 槽位（core 唯一 section，随领域 install 叠加 core 基座 + 领域补充）、固定会话 ensure、开场 notice 投递、启动宽限期（装配中顺延，失败不消耗宽限）。
 - **日志体系**：分级门面（同时转发 `ctx.logger` 与 exporter）、按天 JSONL（`<UTC 日期>.jsonl`）、超限滚动、保留期清理、字段级脱敏、`trace` 关联 id。
 - **测试体系与 CI**：777 例；六条安全反例（`tests/counterexamples.spec.ts`）；`version-guard` 守护；领域词检查；文档一致性检查；GitHub Actions 的 `verify` job 与 dsh 双版本矩阵。
 

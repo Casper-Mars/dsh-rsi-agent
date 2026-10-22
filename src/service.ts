@@ -251,7 +251,7 @@ export class AgentHost extends Service<never> implements AgentHostService {
   private current: ActiveDomain | undefined
   /** 最近一次 install 的 provider 就绪信号；未挂载时为已 resolve。 */
   private providerReady: Promise<void> = Promise.resolve()
-  /** persona 单槽位：全程只注册一个 section，领域装/卸只切内部文案。 */
+  /** persona 单槽位：全程只注册一个 section，core 常驻 + 领域追加，装/卸只切内部文案。 */
   private readonly persona: PersonaSlot
   /** 启动宽限控制器；`start()` 只允许创建一次。 */
   private startupController: StartupController | undefined
@@ -269,7 +269,7 @@ export class AgentHost extends Service<never> implements AgentHostService {
     this.logger = createDomainLogger(this.nativeLogger, 'agentHost')
     this.env = config.env
 
-    // 通用人设槽位：core 启动即注册唯一 section；内容随领域 install 切换。
+    // 通用人设槽位：core 启动即注册唯一 section；领域 install 时在 core 之后追加。
     this.persona = createPersonaSlot({
       logger: {
         info: (message, meta) => this.logger.info(message, meta),
@@ -450,7 +450,8 @@ export class AgentHost extends Service<never> implements AgentHostService {
         })
       }
 
-      // 人设切换（§8.1 / §8.2）：只改单 section 的动态 text，**不重建会话**。
+      // 人设叠加（§8.1 / §8.2）：只改单 section 的动态 text（core 常驻 + 领域追加），
+      // **不重建会话**。
       // 放在所有装配动作之后：任何一步失败都不会留下「半个领域人设」。
       this.persona.useDomain(validated.personaMarkdown, identity.id)
       registry.add('persona', 'restore core persona', () => {

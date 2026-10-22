@@ -321,8 +321,8 @@ describe('D · 启动 grace（AgentHost 集成）', () => {
       makePack({ persona: { markdown: () => '# Alpha Persona' }, openingNotice: 'DOMAIN-OPEN' }),
     )
 
-    // 领域 persona 已切换；会话已 live → 直接复用，不再投第二条开场。
-    await waitFor(() => (sections[0].text as () => string)() === '# Alpha Persona')
+    // 领域 persona 已叠加在 core 之后；会话已 live → 直接复用，不再投第二条开场。
+    await waitFor(() => (sections[0].text as () => string)().endsWith('# Alpha Persona'))
     await sleep(50)
 
     expect(env.recorder.notices).toHaveLength(1)

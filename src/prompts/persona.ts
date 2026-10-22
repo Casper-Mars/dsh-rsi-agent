@@ -2,14 +2,18 @@
  * 通用人设槽位（Persona Slot）—— core 启动时注册的**唯一** persona section。
  *
  * 设计要点（技术方案 §4.1 / §8.1）：
- *   1. **单 section + 动态 text provider**：整个进程生命周期内只向 `systemPrompt`
- *      注册一个 `rsi-agent:persona` section，其 `text` 是 `() => current`。领域
- *      install 时只切换内部变量，uninstall 时恢复通用文案 —— 因此不论领域装/
- *      卸多少次，system prompt 里始终**只有 1 个** `rsi-agent:persona`，不会出
- *      现重复 section 或顺序漂移。
- *   2. **晚装不重建会话**：切换 persona 只是一次变量赋值，不触碰会话、不触发
+ *   1. **core 为基座，领域人设追加在后**：`text()` 返回 `core + 分隔符 + domain`；
+ *      领域未安装（或领域正文为空）时返回纯 core。领域人设是**补充而非替代**。
+ *   2. **单 section + 动态 text provider**：整个进程生命周期内只向 `systemPrompt`
+ *      注册一个 `rsi-agent:persona` section，其 `text` 是组合 provider。领域
+ *      install 时只改内部变量，uninstall 时回到纯 core —— 因此不论领域装/卸
+ *      多少次，system prompt 里始终**只有 1 个** `rsi-agent:persona`，不会出现
+ *      重复 section 或顺序漂移。
+ *   3. **晚装不重建会话**：切换 persona 只是一次变量赋值，不触碰会话、不触发
  *      `agents.create/resume`。
- *   3. 每次切换都记 `info`（含 `packId`），便于排障时确认「当前人设来自谁」。
+ *   4. **core 只读一次**：core 正文懒加载后缓存，`restore()` 复用缓存，不重复
+ *      读盘。
+ *   5. 每次切换都记 `info`（含 `packId`），便于排障时确认「当前人设来自谁」。
  *
  * 通用人设正文放在 `./persona.md`，由 `scripts/copy-assets.mjs` 随构建复制到
  * `dist-server/prompts/persona.md`；源码态与编译态下 `new URL('./persona.md',
@@ -24,6 +28,9 @@ export const PERSONA_SECTION_NAME = 'rsi-agent:persona' as const
 
 /** 通用人设 section 的排序位（persona 类靠前）。 */
 export const PERSONA_SECTION_ORDER = 100 as const
+
+/** core 正文与领域正文之间的固定分隔符（v1 不引入可配置项）。 */
+export const PERSONA_DOMAIN_SEPARATOR = '\n\n---\n\n' as const
 
 /** 资源缺失时的兜底人设（正常情况下不会用到，避免 system prompt 为空）。 */
 export const CORE_PERSONA_FALLBACK =
@@ -84,14 +91,19 @@ export interface PersonaSlot {
   readonly source: PersonaSource
   /** 当前领域 id（`source === 'core'` 时为 `undefined`）。 */
   readonly domainId: string | undefined
-  /** 当前人设正文（每次调用返回即时值）。 */
+  /**
+   * 当前生效的人设正文（每次调用返回即时值）。
+   *
+   * `core` 模式下严格等于通用人设原文；`domain` 模式下为
+   * `core + {@link PERSONA_DOMAIN_SEPARATOR} + domain`。
+   */
   text(): string
   /** 组装好的 section（`text` 为动态 provider）。 */
   section(): PromptSectionLike
-  /** 切换为领域人设；`packId` 必填并写入日志。 */
+  /** 叠加领域人设（core 保持在前，领域追加在后）；`packId` 必填并写入日志。 */
   useDomain(markdown: string, packId: string): void
   /**
-   * 恢复通用人设。
+   * 恢复为纯通用人设（移除领域补充）。
    *
    * @param packId 可选：仅当当前领域 id 匹配时才恢复，避免「旧安装的延迟拆卸
    *               把新安装的人设误恢复成通用」。
@@ -111,13 +123,23 @@ export function createPersonaSlot(
 ): PersonaSlot {
   const readCore = options.coreMarkdown ?? loadCorePersonaMarkdown
   const logger = options.logger
-  let current = ''
+  /** 懒加载并缓存的 core 正文；`undefined` 表示尚未读取。 */
+  let coreText: string | undefined
+  /** 领域正文；`undefined` / 空串表示当前没有领域补充。 */
+  let domainText: string | undefined
   let source: PersonaSource = 'core'
   let domainId: string | undefined
 
-  const coreText = (): string => {
-    if (current === '') current = readCore()
-    return current
+  const getCore = (): string => {
+    if (coreText === undefined) coreText = readCore()
+    return coreText
+  }
+
+  const compose = (): string => {
+    const core = getCore()
+    const domain = domainText?.trim()
+    if (domain === undefined || domain === '') return core
+    return `${core}${PERSONA_DOMAIN_SEPARATOR}${domain}`
   }
 
   return {
@@ -130,25 +152,27 @@ export function createPersonaSlot(
       return domainId
     },
     text() {
-      return coreText()
+      return compose()
     },
     section() {
       return {
         name: PERSONA_SECTION_NAME,
         order: PERSONA_SECTION_ORDER,
         // 单 section + 动态 provider：切换人设只改这里的闭包变量。
-        text: () => coreText(),
+        text: () => compose(),
       }
     },
     useDomain(markdown: string, packId: string) {
-      current = markdown
+      domainText = markdown
       source = 'domain'
       domainId = packId
-      logger?.info('[rsi-agent] persona 已切换为领域人设', { packId })
+      logger?.info('[rsi-agent] persona 已叠加领域人设（core + domain）', { packId })
     },
     restore(packId?: string) {
       if (packId !== undefined && domainId !== packId) return false
-      current = readCore()
+      // core 走缓存，只在首次使用时读盘。
+      getCore()
+      domainText = undefined
       source = 'core'
       domainId = undefined
       logger?.info('[rsi-agent] persona 已恢复为通用人设', { packId: packId ?? null })
