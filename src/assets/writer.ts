@@ -233,7 +233,12 @@ export function createAssetWriter(options: CreateAssetWriterOptions): AssetWrite
       return normalized as string
     } catch (error) {
       if (error instanceof AssetPathError) {
-        throw new AssetPathError([`${label}：${error.reasons.join('；')}`])
+        // 逐条加 label，保持 reasons / reasonCodes 的一一对应；原因码原样透传，
+        // 调用方（与反例用例）才能判定「到底是被哪条守卫拦下的」。
+        throw new AssetPathError(
+          error.reasons.map((reason) => `${label}：${reason}`),
+          error.reasonCodes,
+        )
       }
       throw error
     }
@@ -569,7 +574,10 @@ export function createAssetWriter(options: CreateAssetWriterOptions): AssetWrite
     const real = realpathSync(file)
     const rel = relative(realRoot, real)
     if (rel.startsWith('..') || isAbsolute(rel)) {
-      throw new AssetPathError([`read 的路径越界（realpath 落在 assetsDir 之外）："${normalized}"`])
+      throw new AssetPathError(
+        [`read 的路径越界（realpath 落在 assetsDir 之外）："${normalized}"`],
+        ['path_outside_prefix'],
+      )
     }
 
     return readFileSync(real, 'utf8')

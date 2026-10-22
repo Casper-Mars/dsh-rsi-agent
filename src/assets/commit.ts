@@ -84,18 +84,62 @@ export interface CommitAssetsResult {
   actions: AssetActionRecord[]
 }
 
+/**
+ * 拒绝原因码（稳定、机器可判）。
+ *
+ * 为什么需要它：错误信息会回显调用方传入的原始路径，任何「用 `toContain('..')`
+ * 断言被拒」的写法都是恒真的。原因码与文案解耦，既不依赖路径回显，也能让
+ * 不同守卫（`..` 段 / 归一化 / 前缀白名单）互相区分 —— 删掉其中任何一个
+ * 守卫，对应断言都会变红。
+ */
+export type AssetPathReasonCode =
+  | 'asset_types_not_array'
+  | 'asset_type_prefix_invalid'
+  | 'asset_type_prefix_git'
+  | 'asset_type_prefix_backslash'
+  | 'paths_not_array'
+  | 'paths_empty'
+  | 'path_not_string'
+  | 'path_blank'
+  | 'path_backslash'
+  | 'path_nul'
+  | 'path_absolute'
+  | 'path_trailing_slash'
+  | 'path_empty_segment'
+  | 'path_dot_segment'
+  /** 唯一由 `..` 守卫产生的原因码：其它守卫一律不会产出它。 */
+  | 'path_dotdot_segment'
+  | 'path_git_segment'
+  | 'path_not_normalized'
+  | 'no_asset_prefix'
+  | 'path_outside_prefix'
+
 /** 路径非法（调用方编程错误）。`reasons` 逐条列出每个被拒路径的原因。 */
 export class AssetPathError extends Error {
   /** 逐条拒绝原因（与 `paths` 一一对应，可能多条针对同一路径）。 */
   readonly reasons: readonly string[]
 
-  constructor(reasons: readonly string[]) {
+  /** 与 {@link reasons} 下标一一对应的稳定原因码。 */
+  readonly reasonCodes: readonly AssetPathReasonCode[]
+
+  constructor(reasons: readonly string[], reasonCodes: readonly AssetPathReasonCode[] = []) {
     const detail =
       reasons.length === 0 ? '路径非法' : `路径非法（${reasons.length} 条）：\n- ${reasons.join('\n- ')}`
     super(`[assets] ${detail}`)
     this.name = 'AssetPathError'
     this.reasons = [...reasons]
+    this.reasonCodes = [...reasonCodes]
   }
+
+  /** 是否含有某个原因码（调用方 / 测试的精确判据）。 */
+  hasReason(code: AssetPathReasonCode): boolean {
+    return this.reasonCodes.includes(code)
+  }
+}
+
+/** 收集拒绝原因的出口：文案与原因码必须成对写入，避免下标错位。 */
+interface ReasonSink {
+  reject(code: AssetPathReasonCode, message: string): void
 }
 
 /** 归一化日志出口为 warn 函数（缺省静默）。 */
@@ -105,9 +149,19 @@ function warnOf(logger: CommitAssetsLogger | undefined): (message: string) => vo
   return (message: string) => logger.warn(message)
 }
 
-/** `true` 表示该段是路径分隔语义之外的非法段。 */
-function isIllegalSegment(segment: string): boolean {
-  return segment === '' || segment === '.' || segment === '..'
+/** 非法段的类别：空段 / `.` / `..` 各有独立原因码与文案。 */
+function classifyIllegalSegment(segment: string): AssetPathReasonCode | undefined {
+  if (segment === '') return 'path_empty_segment'
+  if (segment === '.') return 'path_dot_segment'
+  if (segment === '..') return 'path_dotdot_segment'
+  return undefined
+}
+
+/** 非法段 → 人类可读文案（`..` 的文案与归一化 / 前缀检查明确区分）。 */
+const ILLEGAL_SEGMENT_TEXT: Partial<Record<AssetPathReasonCode, string>> = {
+  path_empty_segment: '不得包含空路径段（"//"）',
+  path_dot_segment: '不得包含 "." 路径段（当前目录）',
+  path_dotdot_segment: '不得包含 ".." 路径段（不允许上溯父目录）',
 }
 
 /** 取某个资产类型前缀的路径段（不含结尾空段）。 */
@@ -122,29 +176,41 @@ function isUnderPrefix(segments: readonly string[], prefix: readonly string[]): 
 }
 
 /** 收集可用的资产前缀（顺带拒绝非法的 `assetTypes` 声明）。 */
-function resolvePrefixes(assetTypes: readonly AssetType[], reasons: string[]): string[][] {
+function resolvePrefixes(assetTypes: readonly AssetType[], sink: ReasonSink): string[][] {
   if (!Array.isArray(assetTypes)) {
-    reasons.push('assetTypes 必须是数组')
+    sink.reject('asset_types_not_array', 'assetTypes 必须是数组')
     return []
   }
   const result: string[][] = []
   assetTypes.forEach((assetType, index) => {
     const prefix = assetType?.prefix
     if (typeof prefix !== 'string' || prefix === '' || !prefix.endsWith('/')) {
-      reasons.push(`assetTypes[${index}].prefix 非法：必须以 "/" 结尾的相对路径`)
+      sink.reject(
+        'asset_type_prefix_invalid',
+        `assetTypes[${index}].prefix 非法：必须以 "/" 结尾的相对路径`,
+      )
       return
     }
     const segments = prefixSegments(prefix)
-    if (segments.length === 0 || segments.some((segment) => isIllegalSegment(segment))) {
-      reasons.push(`assetTypes[${index}].prefix 非法：${JSON.stringify(prefix)}`)
+    if (segments.length === 0 || segments.some((segment) => classifyIllegalSegment(segment) !== undefined)) {
+      sink.reject(
+        'asset_type_prefix_invalid',
+        `assetTypes[${index}].prefix 非法：${JSON.stringify(prefix)}`,
+      )
       return
     }
     if (segments.some((segment) => segment.toLowerCase() === '.git')) {
-      reasons.push(`assetTypes[${index}].prefix 不得指向 .git：${JSON.stringify(prefix)}`)
+      sink.reject(
+        'asset_type_prefix_git',
+        `assetTypes[${index}].prefix 不得指向 .git：${JSON.stringify(prefix)}`,
+      )
       return
     }
     if (prefix.includes('\\')) {
-      reasons.push(`assetTypes[${index}].prefix 不得包含反斜杠：${JSON.stringify(prefix)}`)
+      sink.reject(
+        'asset_type_prefix_backslash',
+        `assetTypes[${index}].prefix 不得包含反斜杠：${JSON.stringify(prefix)}`,
+      )
       return
     }
     result.push(segments)
@@ -174,15 +240,22 @@ export function validateAssetPaths(
   assetTypes: readonly AssetType[],
 ): string[] {
   const reasons: string[] = []
-  const prefixes = resolvePrefixes(assetTypes, reasons)
+  const codes: AssetPathReasonCode[] = []
+  const sink: ReasonSink = {
+    reject(code, message) {
+      codes.push(code)
+      reasons.push(message)
+    },
+  }
+  const prefixes = resolvePrefixes(assetTypes, sink)
 
   if (!Array.isArray(raw)) {
-    reasons.push(`paths 必须是字符串数组，实际为 ${typeof raw}`)
-    throw new AssetPathError(reasons)
+    sink.reject('paths_not_array', `paths 必须是字符串数组，实际为 ${typeof raw}`)
+    throw new AssetPathError(reasons, codes)
   }
   if (raw.length === 0) {
-    reasons.push('paths 不能为空数组（至少 1 项）')
-    throw new AssetPathError(reasons)
+    sink.reject('paths_empty', 'paths 不能为空数组（至少 1 项）')
+    throw new AssetPathError(reasons, codes)
   }
 
   const seen = new Set<string>()
@@ -191,41 +264,54 @@ export function validateAssetPaths(
   raw.forEach((value: unknown, index: number) => {
     const at = `paths[${index}]`
     if (typeof value !== 'string') {
-      reasons.push(`${at} 必须是字符串，实际为 ${value === null ? 'null' : typeof value}`)
+      sink.reject(
+        'path_not_string',
+        `${at} 必须是字符串，实际为 ${value === null ? 'null' : typeof value}`,
+      )
       return
     }
     const path = value
     if (path.trim() === '') {
-      reasons.push(`${at} 不能为空字符串`)
+      sink.reject('path_blank', `${at} 不能为空字符串`)
       return
     }
     if (path.includes('\\')) {
-      reasons.push(`${at} ${JSON.stringify(path)}：不得包含反斜杠（只接受 posix 路径）`)
+      sink.reject(
+        'path_backslash',
+        `${at} ${JSON.stringify(path)}：不得包含反斜杠（只接受 posix 路径）`,
+      )
       return
     }
     if (path.includes('\0')) {
-      reasons.push(`${at} ${JSON.stringify(path)}：不得包含空字符`)
+      sink.reject('path_nul', `${at} ${JSON.stringify(path)}：不得包含空字符`)
       return
     }
     if (path.startsWith('/') || isAbsolute(path) || /^[A-Za-z]:/.test(path)) {
-      reasons.push(`${at} ${JSON.stringify(path)}：不得为绝对路径`)
+      sink.reject('path_absolute', `${at} ${JSON.stringify(path)}：不得为绝对路径`)
       return
     }
     if (path.endsWith('/')) {
-      reasons.push(`${at} ${JSON.stringify(path)}：不得以 "/" 结尾（必须是文件路径）`)
+      sink.reject(
+        'path_trailing_slash',
+        `${at} ${JSON.stringify(path)}：不得以 "/" 结尾（必须是文件路径）`,
+      )
       return
     }
 
     const segments = path.split('/')
     let rejected = false
     for (const segment of segments) {
-      if (isIllegalSegment(segment)) {
-        reasons.push(`${at} ${JSON.stringify(path)}：不得包含空段 / "." / ".." 路径段`)
+      // `..` 在这里拥有独立的失败模式：它是唯一一个「上溯父目录」的语义，
+      // 必须与「归一化后不一致」「不在前缀之下」两类守卫区分开，否则删掉
+      // 本守卫时用例仍会因为别的守卫而变绿（突变不敏感）。
+      const illegal = classifyIllegalSegment(segment)
+      if (illegal !== undefined) {
+        sink.reject(illegal, `${at} ${JSON.stringify(path)}：${ILLEGAL_SEGMENT_TEXT[illegal]}`)
         rejected = true
         break
       }
       if (segment.toLowerCase() === '.git') {
-        reasons.push(`${at} ${JSON.stringify(path)}：不得包含 ".git" 路径段`)
+        sink.reject('path_git_segment', `${at} ${JSON.stringify(path)}：不得包含 ".git" 路径段`)
         rejected = true
         break
       }
@@ -234,18 +320,23 @@ export function validateAssetPaths(
 
     const normalized = posix.normalize(segments.join('/'))
     if (normalized !== segments.join('/')) {
-      reasons.push(`${at} ${JSON.stringify(path)}：归一化后路径不一致（${normalized}）`)
+      sink.reject(
+        'path_not_normalized',
+        `${at} ${JSON.stringify(path)}：归一化后路径不一致（${normalized}）`,
+      )
       return
     }
 
     if (prefixes.length === 0) {
-      reasons.push(
+      sink.reject(
+        'no_asset_prefix',
         `${at} ${JSON.stringify(path)}：没有可用的资产前缀（${describePrefixes(assetTypes)}）`,
       )
       return
     }
     if (!prefixes.some((prefix) => isUnderPrefix(segments, prefix))) {
-      reasons.push(
+      sink.reject(
+        'path_outside_prefix',
         `${at} ${JSON.stringify(path)}：不在任何资产前缀之下（允许：${describePrefixes(assetTypes)}）`,
       )
       return
@@ -257,7 +348,7 @@ export function validateAssetPaths(
     }
   })
 
-  if (reasons.length > 0) throw new AssetPathError(reasons)
+  if (reasons.length > 0) throw new AssetPathError(reasons, codes)
   return result
 }
 

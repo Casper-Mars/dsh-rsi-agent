@@ -127,6 +127,7 @@ export {
   commitAssets,
   validateAssetPaths,
   type AssetAction,
+  type AssetPathReasonCode,
   type AssetActionRecord,
   type CommitAssetsInput,
   type CommitAssetsLogger,

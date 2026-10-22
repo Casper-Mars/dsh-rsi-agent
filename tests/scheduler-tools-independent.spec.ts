@@ -150,58 +150,65 @@ const flush = async (): Promise<void> => {
 // ---------------------------------------------------------------------------
 
 describe('A · 真实 git 提交（非 mock）', () => {
-  it('create/update/disable/enable/delete 各产生恰好 1 次 commit，首行动作词正确', async () => {
-    const fixture = setup()
-    const base = commitCount(fixture.assetsDir)
-    const programBefore = readFileSync(join(fixture.programsDir, 'demo', 'task.ts'), 'utf8')
+  // 本用例串行做 5 次写工具调用（每次真实 git commit），是文件里最重的一条：
+  // 全量并发（4 worker）下 7 次跑挂 2 次，均 15s 超时；单跑稳定 38/38。
+  // 只放宽这一条到 45s，其它用例保持 15s，避免掩盖真正的挂死。
+  it(
+    'create/update/disable/enable/delete 各产生恰好 1 次 commit，首行动作词正确',
+    { timeout: 45_000 },
+    async () => {
+      const fixture = setup()
+      const base = commitCount(fixture.assetsDir)
+      const programBefore = readFileSync(join(fixture.programsDir, 'demo', 'task.ts'), 'utf8')
 
-    // 1) create
-    await call(fixture, 'task_create', VALID)
-    expect(commitCount(fixture.assetsDir)).toBe(base + 1)
-    expect(subjects(fixture.assetsDir)[0]).toBe('tasks: create demo')
-    expect(bodies(fixture.assetsDir)[0].split('\n')[0]).toBe('tasks: create demo')
-    expect(bodies(fixture.assetsDir)[0]).toContain('assets: create tasks/demo.json')
-    expect(runGit(['ls-files', '--error-unmatch', 'tasks/demo.json'], fixture.assetsDir).ok).toBe(true)
+      // 1) create
+      await call(fixture, 'task_create', VALID)
+      expect(commitCount(fixture.assetsDir)).toBe(base + 1)
+      expect(subjects(fixture.assetsDir)[0]).toBe('tasks: create demo')
+      expect(bodies(fixture.assetsDir)[0].split('\n')[0]).toBe('tasks: create demo')
+      expect(bodies(fixture.assetsDir)[0]).toContain('assets: create tasks/demo.json')
+      expect(runGit(['ls-files', '--error-unmatch', 'tasks/demo.json'], fixture.assetsDir).ok).toBe(true)
 
-    // 2) update
-    const afterCreate = commitCount(fixture.assetsDir)
-    await call(fixture, 'task_update', { id: 'demo', name: '改名', cron: '*/30 * * * *' })
-    expect(commitCount(fixture.assetsDir)).toBe(afterCreate + 1)
-    expect(subjects(fixture.assetsDir)[0]).toBe('tasks: update demo')
-    expect(bodies(fixture.assetsDir)[0]).toContain('assets: update tasks/demo.json')
+      // 2) update
+      const afterCreate = commitCount(fixture.assetsDir)
+      await call(fixture, 'task_update', { id: 'demo', name: '改名', cron: '*/30 * * * *' })
+      expect(commitCount(fixture.assetsDir)).toBe(afterCreate + 1)
+      expect(subjects(fixture.assetsDir)[0]).toBe('tasks: update demo')
+      expect(bodies(fixture.assetsDir)[0]).toContain('assets: update tasks/demo.json')
 
-    // 3) disable
-    const afterUpdate = commitCount(fixture.assetsDir)
-    await call(fixture, 'task_disable', { id: 'demo' })
-    expect(commitCount(fixture.assetsDir)).toBe(afterUpdate + 1)
-    expect(subjects(fixture.assetsDir)[0]).toBe('tasks: disable demo')
-    expect(bodies(fixture.assetsDir)[0]).toContain('assets: update tasks/demo.json')
+      // 3) disable
+      const afterUpdate = commitCount(fixture.assetsDir)
+      await call(fixture, 'task_disable', { id: 'demo' })
+      expect(commitCount(fixture.assetsDir)).toBe(afterUpdate + 1)
+      expect(subjects(fixture.assetsDir)[0]).toBe('tasks: disable demo')
+      expect(bodies(fixture.assetsDir)[0]).toContain('assets: update tasks/demo.json')
 
-    // 4) enable
-    const afterDisable = commitCount(fixture.assetsDir)
-    await call(fixture, 'task_enable', { id: 'demo' })
-    expect(commitCount(fixture.assetsDir)).toBe(afterDisable + 1)
-    expect(subjects(fixture.assetsDir)[0]).toBe('tasks: enable demo')
+      // 4) enable
+      const afterDisable = commitCount(fixture.assetsDir)
+      await call(fixture, 'task_enable', { id: 'demo' })
+      expect(commitCount(fixture.assetsDir)).toBe(afterDisable + 1)
+      expect(subjects(fixture.assetsDir)[0]).toBe('tasks: enable demo')
 
-    // 5) delete
-    const afterEnable = commitCount(fixture.assetsDir)
-    await call(fixture, 'task_delete', { id: 'demo' })
-    expect(commitCount(fixture.assetsDir)).toBe(afterEnable + 1)
-    expect(subjects(fixture.assetsDir)[0]).toBe('tasks: remove demo')
-    expect(bodies(fixture.assetsDir)[0]).toContain('assets: delete tasks/demo.json')
+      // 5) delete
+      const afterEnable = commitCount(fixture.assetsDir)
+      await call(fixture, 'task_delete', { id: 'demo' })
+      expect(commitCount(fixture.assetsDir)).toBe(afterEnable + 1)
+      expect(subjects(fixture.assetsDir)[0]).toBe('tasks: remove demo')
+      expect(bodies(fixture.assetsDir)[0]).toContain('assets: delete tasks/demo.json')
 
-    // 五次写操作 → 恰好 5 次新提交
-    expect(commitCount(fixture.assetsDir)).toBe(base + 5)
+      // 五次写操作 → 恰好 5 次新提交
+      expect(commitCount(fixture.assetsDir)).toBe(base + 5)
 
-    // 定义消失，程序文件仍在（且未被 git 删除）
-    expect(existsSync(join(fixture.tasksDir, 'demo.json'))).toBe(false)
-    expect(existsSync(join(fixture.programsDir, 'demo', 'task.ts'))).toBe(true)
-    expect(readFileSync(join(fixture.programsDir, 'demo', 'task.ts'), 'utf8')).toBe(programBefore)
-    expect(runGit(['ls-files', '--error-unmatch', 'programs/demo/task.ts'], fixture.assetsDir).ok).toBe(true)
+      // 定义消失，程序文件仍在（且未被 git 删除）
+      expect(existsSync(join(fixture.tasksDir, 'demo.json'))).toBe(false)
+      expect(existsSync(join(fixture.programsDir, 'demo', 'task.ts'))).toBe(true)
+      expect(readFileSync(join(fixture.programsDir, 'demo', 'task.ts'), 'utf8')).toBe(programBefore)
+      expect(runGit(['ls-files', '--error-unmatch', 'programs/demo/task.ts'], fixture.assetsDir).ok).toBe(true)
 
-    // 工作区干净：没有遗留未提交改动
-    expect(runGit(['status', '--porcelain'], fixture.assetsDir).stdout.trim()).toBe('')
-  })
+      // 工作区干净：没有遗留未提交改动
+      expect(runGit(['status', '--porcelain'], fixture.assetsDir).stdout.trim()).toBe('')
+    },
+  )
 
   it('内容无变化时不产生空 commit（enable 连按两次）', async () => {
     const fixture = setup()

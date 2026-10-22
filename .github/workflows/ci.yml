@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    name: verify (node 22 · pnpm 11.7)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Domain-word guard (core 必须与领域无关)
+        run: pnpm check:domain-words
+
+      - name: Docs consistency
+        run: pnpm wiki:check
+
+      - name: Test
+        run: pnpm test
+
+  # 双版本矩阵：证明版本门槛（peerDependencies）在最低与当前版本上都成立。
+  # 不设 continue-on-error —— 任一版本失败都必须让 CI 红。
+  matrix-dsh-versions:
+    name: dsh ${{ matrix.dsh }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh:
+          - '0.2.0-rc.2'
+          - '0.2.1-rc.2'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Override dsh packages to ${{ matrix.dsh }}
+        run: >-
+          pnpm add -D
+          @deepseek-ai/dsh-llm@${{ matrix.dsh }}
+          @deepseek-ai/dsh-skill@${{ matrix.dsh }}
+          @deepseek-ai/dsh-skill-filesystem@${{ matrix.dsh }}
+          @deepseek-ai/dsh-tools@${{ matrix.dsh }}
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # 与 verify job 对齐：矩阵里也要跑这两条，否则「版本门槛成立」的结论
+      # 缺少领域无关性与文档一致性的前提。
+      - name: Domain-word guard (core 必须与领域无关)
+        run: pnpm check:domain-words
+
+      - name: Docs consistency
+        run: pnpm wiki:check
+
+      - name: Test
+        run: pnpm test

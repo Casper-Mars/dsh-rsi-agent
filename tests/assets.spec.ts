@@ -46,6 +46,7 @@ import {
   runGit,
   validateAssetPaths,
 } from '../src/index'
+import type { AssetPathReasonCode } from '../src/index'
 import type { AssetType, DomainPack, ToolDefinition } from '../src/types'
 
 const ASSET_TYPES: AssetType[] = [
@@ -272,13 +273,15 @@ describe('assets/commit：写入即 commit', () => {
     const { root, home, assetsDir } = sandbox()
     ensureAssetsRepo(home)
 
-    const cases: Array<{ path: string; hint: string }> = [
-      { path: '../escape.md', hint: '..' },
-      { path: '/abs/path', hint: '绝对路径' },
-      { path: '.git/config', hint: '.git' },
-      { path: 'a\\b.md', hint: '反斜杠' },
-      { path: 'records2/x.md', hint: '资产前缀' },
-      { path: 'records/../../x.md', hint: '..' },
+    // `hint` 必须是**该守卫独有**的措辞；`code` 是机器可判的原因码。
+    // 不要用 `toContain('..')`：错误信息回显输入路径，该断言恒真。
+    const cases: Array<{ path: string; hint: string; code: AssetPathReasonCode }> = [
+      { path: '../escape.md', hint: '不得包含 ".." 路径段', code: 'path_dotdot_segment' },
+      { path: '/abs/path', hint: '绝对路径', code: 'path_absolute' },
+      { path: '.git/config', hint: '.git', code: 'path_git_segment' },
+      { path: 'a\\b.md', hint: '反斜杠', code: 'path_backslash' },
+      { path: 'records2/x.md', hint: '资产前缀', code: 'path_outside_prefix' },
+      { path: 'records/../../x.md', hint: '不得包含 ".." 路径段', code: 'path_dotdot_segment' },
     ]
 
     for (const item of cases) {
@@ -292,6 +295,7 @@ describe('assets/commit：写入即 commit', () => {
       const error = caught as AssetPathError
       expect(error.message).toContain(item.path.replaceAll('\\', '\\\\'))
       expect(error.message).toContain(item.hint)
+      expect(error.hasReason(item.code), `${item.path} 的原因码应为 ${item.code}`).toBe(true)
     }
 
     // 没有逃逸文件被创建；资产目录里只有 .git / .gitignore / records。
